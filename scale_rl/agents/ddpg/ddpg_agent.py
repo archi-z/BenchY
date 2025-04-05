@@ -1,13 +1,9 @@
-import functools
+from typing import Dict, Tuple, Union
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import gymnasium as gym
-import jax
-import jax.numpy as jnp
 import numpy as np
-import optax
-from flax.training import dynamic_scale
+import torch
 
 from scale_rl.agents.base_agent import BaseAgent
 from scale_rl.agents.ddpg.ddpg_network import (
@@ -15,20 +11,9 @@ from scale_rl.agents.ddpg.ddpg_network import (
     DDPGClippedDoubleCritic,
     DDPGCritic,
 )
-from scale_rl.agents.ddpg.ddpg_update import (
-    update_actor,
-    update_critic,
-    update_target_network,
-)
-from scale_rl.buffers.base_buffer import Batch
+from scale_rl.agents.ddpg.ddpg_update import update_ddpg_networks
 from scale_rl.common.colored_noise import ColoredNoiseProcess
 from scale_rl.common.scheduler import linear_decay_scheduler
-from scale_rl.networks.trainer import PRNGKey, Trainer
-
-"""
-The @dataclass decorator must have `frozen=True` to ensure the instance is immutable,
-allowing it to be treated as a static variable in JAX.
-"""
 
 
 @dataclass(frozen=True)
@@ -64,157 +49,59 @@ class DDPGConfig:
     mixed_precision: bool
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "observation_dim",
-        "action_dim",
-        "cfg",
-    ),
-)
 def _init_ddpg_networks(
     observation_dim: int,
     action_dim: int,
-    cfg: DDPGConfig,
-) -> Tuple[PRNGKey, Trainer, Trainer, Trainer]:
-    fake_observations = jnp.zeros((1, observation_dim))
-    fake_actions = jnp.zeros((1, action_dim))
+    cfg: DDPGConfig
+) -> Tuple[
+    DDPGActor,
+    Union[DDPGCritic, DDPGClippedDoubleCritic],
+    Union[DDPGCritic, DDPGClippedDoubleCritic],
+    ]:
+    compute_dtype = torch.float16 if cfg.mixed_precision else torch.float32
 
-    rng = jax.random.PRNGKey(cfg.seed)
-    rng, actor_key, critic_key = jax.random.split(rng, 3)
-    compute_dtype = jnp.float16 if cfg.mixed_precision else jnp.float32
-
-    # When initializing the network in the flax.nn.Module class, rng_key should be passed as rngs.
-    actor = Trainer.create(
-        network_def=DDPGActor(
+    actor = DDPGActor(
             block_type=cfg.actor_block_type,
             num_blocks=cfg.actor_num_blocks,
+            input_dim=observation_dim,
             hidden_dim=cfg.actor_hidden_dim,
             action_dim=action_dim,
-            dtype=compute_dtype,
-        ),
-        network_inputs={"rngs": actor_key, "observations": fake_observations},
-        tx=optax.adamw(
-            learning_rate=cfg.actor_learning_rate,
-            weight_decay=cfg.actor_weight_decay,
-        ),
-        dynamic_scale=dynamic_scale.DynamicScale() if cfg.mixed_precision else None,
-    )
-
+            dtype=compute_dtype
+        )
+    
     if cfg.critic_use_cdq:
-        critic_network_def = DDPGClippedDoubleCritic(
+        critic = DDPGClippedDoubleCritic(
             block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
+            input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype,
+            dtype=compute_dtype
         )
+        target_critic = DDPGClippedDoubleCritic(
+            block_type=cfg.critic_block_type,
+            num_blocks=cfg.critic_num_blocks,
+            input_dim=observation_dim+action_dim,
+            hidden_dim=cfg.critic_hidden_dim,
+            dtype=compute_dtype
+        )
+
     else:
-        critic_network_def = DDPGCritic(
+        critic = DDPGCritic(
             block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
+            input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype,
+            dtype=compute_dtype
+        )
+        target_critic = DDPGCritic(
+            block_type=cfg.critic_block_type,
+            num_blocks=cfg.critic_num_blocks,
+            input_dim=observation_dim+action_dim,
+            hidden_dim=cfg.critic_hidden_dim,
+            dtype=compute_dtype
         )
 
-    critic = Trainer.create(
-        network_def=critic_network_def,
-        network_inputs={
-            "rngs": critic_key,
-            "observations": fake_observations,
-            "actions": fake_actions,
-        },
-        tx=optax.adamw(
-            learning_rate=cfg.critic_learning_rate,
-            weight_decay=cfg.critic_weight_decay,
-        ),
-        dynamic_scale=dynamic_scale.DynamicScale() if cfg.mixed_precision else None,
-    )
-
-    # we set target critic's parameters identical to critic by using same rng.
-    target_network_def = critic_network_def
-    target_critic = Trainer.create(
-        network_def=target_network_def,
-        network_inputs={
-            "rngs": critic_key,
-            "observations": fake_observations,
-            "actions": fake_actions,
-        },
-        tx=None,
-    )
-
-    return rng, actor, critic, target_critic
-
-
-@jax.jit
-def _sample_ddpg_actions(
-    rng: PRNGKey,
-    actor: Trainer,
-    observations: jnp.ndarray,
-) -> Tuple[PRNGKey, jnp.ndarray]:
-    rng, key = jax.random.split(rng)
-    actions = actor(observations=observations)
-
-    return rng, actions
-
-
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "gamma",
-        "n_step",
-        "critic_use_cdq",
-        "target_tau",
-        "noise_std",
-    ),
-)
-def _update_ddpg_networks(
-    rng: PRNGKey,
-    actor: Trainer,
-    critic: Trainer,
-    target_critic: Trainer,
-    batch: Batch,
-    gamma: float,
-    n_step: int,
-    critic_use_cdq: bool,
-    target_tau: float,
-    noise_std: float,
-) -> Tuple[PRNGKey, Trainer, Trainer, Trainer, Trainer, Dict[str, float]]:
-    rng, actor_key, critic_key = jax.random.split(rng, 3)
-
-    new_actor, actor_info = update_actor(
-        key=actor_key,
-        actor=actor,
-        critic=critic,
-        batch=batch,
-        critic_use_cdq=critic_use_cdq,
-        noise_std=noise_std,
-    )
-
-    new_critic, critic_info = update_critic(
-        key=critic_key,
-        actor=new_actor,
-        critic=critic,
-        target_critic=target_critic,
-        batch=batch,
-        gamma=gamma,
-        n_step=n_step,
-        critic_use_cdq=critic_use_cdq,
-        noise_std=noise_std,
-    )
-
-    new_target_critic, target_critic_info = update_target_network(
-        network=new_critic,
-        target_network=target_critic,
-        target_tau=target_tau,
-    )
-
-    info = {
-        **actor_info,
-        **critic_info,
-        **target_critic_info,
-    }
-
-    return (rng, new_actor, new_critic, new_target_critic, info)
+    return actor, critic, target_critic
 
 
 class DDPGAgent(BaseAgent):
@@ -222,32 +109,27 @@ class DDPGAgent(BaseAgent):
         self,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
-        cfg: DDPGConfig,
+        cfg: DDPGConfig
     ):
-        """
-        An agent that randomly selects actions without training.
-        Useful for collecting baseline results and for debugging purposes.
-        """
-
-        super(DDPGAgent, self).__init__(
+        super().__init__(
             observation_space,
             action_space,
-            cfg,
+            cfg
         )
 
         self._observation_dim = observation_space.shape[-1]
         self._action_dim = action_space.shape[-1]
-
-        # map dictionary to dataclass
         self._cfg = DDPGConfig(**cfg)
-
+    
         self._init_network()
         self._init_exp_scheduler()
         self._init_action_noise()
 
+        self._actor_optimizer = torch.optim.AdamW(self._actor.parameters(),lr=self._cfg.actor_learning_rate)
+        self._critic_optimizer = torch.optim.AdamW(self._critic.parameters(), lr=self._cfg.critic_learning_rate)
+
     def _init_network(self):
         (
-            self._rng,
             self._actor,
             self._critic,
             self._target_critic,
@@ -260,8 +142,9 @@ class DDPGAgent(BaseAgent):
                 initial_value=self._cfg.exp_noise_std_init,
                 final_value=self._cfg.exp_noise_std_final,
             )
+
         else:
-            raise NotImplemented
+            raise NotImplementedError(f"Unsupported exp_noise_scheduler: {self._cfg.exp_noise_scheduler}")
 
     def _init_action_noise(self):
         self._action_noise = []
@@ -271,7 +154,7 @@ class DDPGAgent(BaseAgent):
             self._action_noise.append(
                 ColoredNoiseProcess(
                     beta=self._cfg.exp_noise_color,
-                    size=(self._action_dim, self._cfg.max_episode_steps),
+                    size=(self._action_dim, self._cfg.max_episode_steps)
                 )
             )
 
@@ -279,7 +162,7 @@ class DDPGAgent(BaseAgent):
         self,
         interaction_step: int,
         prev_timestep: Dict[str, np.ndarray],
-        training: bool,
+        training: bool
     ) -> np.ndarray:
         if training:
             # reinitialize the noise if env was reinitialized
@@ -301,38 +184,43 @@ class DDPGAgent(BaseAgent):
         else:
             action_noise = 0.0
 
-        # current timestep observation is "next" observations from the previous timestep
-        observations = jnp.asarray(prev_timestep["next_observation"])
-        self._rng, actions = _sample_ddpg_actions(self._rng, self._actor, observations)
-        actions = np.array(actions)
-        actions = np.clip(actions + action_noise, -1, 1)
+        with torch.no_grad():
+            # current timestep observation is "next" observations from the previous timestep
+            observations = torch.as_tensor(prev_timestep["next_observation"])
+            actions = self._actor(observations)
+            actions = np.array(actions)
+            actions = np.clip(actions+action_noise, -1, 1)
 
         return actions
 
-    def update(self, update_step: int, batch: Dict[str, np.ndarray]) -> Dict:
+    def update(
+        self,
+        update_step: int,
+        batch: Dict[str, np.ndarray]
+    ) -> Dict:
         for key, value in batch.items():
-            batch[key] = jnp.asarray(value)
+            batch[key] = torch.as_tensor(value)
 
         (
-            self._rng,
             self._actor,
             self._critic,
             self._target_critic,
-            update_info,
-        ) = _update_ddpg_networks(
-            rng=self._rng,
+            update_info
+        ) = update_ddpg_networks(
             actor=self._actor,
             critic=self._critic,
             target_critic=self._target_critic,
+            actor_optimizer=self._actor_optimizer,
+            critic_optimizer=self._critic_optimizer,
             batch=batch,
             gamma=self._cfg.gamma,
             n_step=self._cfg.n_step,
             target_tau=self._cfg.target_tau,
             critic_use_cdq=self._cfg.critic_use_cdq,
-            noise_std=self._noise_std,
+            noise_std=self._noise_std
         )
 
         for key, value in update_info.items():
             update_info[key] = float(value)
-
+        
         return update_info

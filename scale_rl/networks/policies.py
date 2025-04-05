@@ -1,78 +1,30 @@
 """
 Implementation of commonly used policies that can be shared across agents.
 """
-from typing import Any
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-import flax.linen as nn
-import jax.numpy as jnp
-from jax.lax import convert_element_type
-from tensorflow_probability.substrates import jax as tfp
-
-from scale_rl.networks.utils import orthogonal_init
-
-tfd = tfp.distributions
-tfb = tfp.bijectors
+from scale_rl.networks.utils import orthogonal_init_
 
 
 class NormalTanhPolicy(nn.Module):
-    action_dim: int
-    state_dependent_std: bool = True
-    kernel_init_scale: float = 1.0
-    log_std_min: float = -10.0
-    log_std_max: float = 2.0
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(
-        self,
-        inputs: jnp.ndarray,
-        temperature: float = 1.0,
-    ) -> tfd.Distribution:
-        means = nn.Dense(
-            self.action_dim,
-            kernel_init=orthogonal_init(self.kernel_init_scale),
-            dtype=self.dtype,
-        )(inputs)
-
-        if self.state_dependent_std:
-            log_stds = nn.Dense(
-                self.action_dim,
-                kernel_init=orthogonal_init(self.kernel_init_scale),
-                dtype=self.dtype,
-            )(inputs)
-        else:
-            log_stds = self.param("log_stds", nn.initializers.zeros, (self.action_dim,))
-
-        log_stds = convert_element_type(log_stds, jnp.float32)
-
-        # suggested by Ilya for stability
-        log_stds = self.log_std_min + (self.log_std_max - self.log_std_min) * 0.5 * (
-            1 + nn.tanh(log_stds)
-        )
-
-        # N(mu, exp(log_sigma))
-        dist = tfd.MultivariateNormalDiag(
-            loc=convert_element_type(means, jnp.float32),
-            scale_diag=jnp.exp(log_stds) * temperature,
-        )
-
-        # tanh(N(mu, sigma))
-        dist = tfd.TransformedDistribution(distribution=dist, bijector=tfb.Tanh())
-
-        return dist
+    pass
 
 
 class TanhPolicy(nn.Module):
-    action_dim: int
-    kernel_init_scale: float = 1.0
-
-    @nn.compact
-    def __call__(
+    def __init__(
         self,
-        inputs: jnp.ndarray,
-    ) -> tfd.Distribution:
-        actions = nn.Dense(
-            self.action_dim, kernel_init=orthogonal_init(self.kernel_init_scale)
-        )(inputs)
+        hidden_dim: int,
+        action_dim: int,
+        kernel_init_scale=1.0
+    ):
+        super().__init__()
 
-        return nn.tanh(actions)
+        self.fc = nn.Linear(hidden_dim, action_dim)
+
+        orthogonal_init_(self.fc, gain=kernel_init_scale)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        actions = self.fc(features)
+        return F.tanh(actions)

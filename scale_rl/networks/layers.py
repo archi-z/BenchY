@@ -1,44 +1,57 @@
-from typing import Any
+import math
 
-import flax.linen as nn
-import jax.numpy as jnp
+import torch
+import torch.nn as nn
 
-from scale_rl.networks.utils import he_normal_init, orthogonal_init
+from scale_rl.networks.utils import he_normal_init_, orthogonal_init_
 
 
 class MLPBlock(nn.Module):
-    hidden_dim: int
-    dtype: Any
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        dtype: torch.dtype
+    ):
+        super().__init__()
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        # sqrt(2) is recommended when using with ReLU activation.
-        x = nn.Dense(
-            self.hidden_dim,
-            kernel_init=orthogonal_init(jnp.sqrt(2)),
-            dtype=self.dtype,
-        )(x)
-        x = nn.relu(x)
-        x = nn.Dense(
-            self.hidden_dim,
-            kernel_init=orthogonal_init(jnp.sqrt(2)),
-            dtype=self.dtype,
-        )(x)
-        x = nn.relu(x)
+        self.fc1 = nn.Linear(input_dim, hidden_dim, dtype=dtype)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim, dtype=dtype)
+        self.relu = nn.ReLU()
+
+        orthogonal_init_(self.fc1, gain=math.sqrt(2))
+        orthogonal_init_(self.fc2, gain=math.sqrt(2))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+
         return x
 
 
 class ResidualBlock(nn.Module):
-    hidden_dim: int
-    dtype: Any
+    def __init__(
+        self,
+        hidden_dim: int,
+        dtype: torch.dtype
+    ):
+        super().__init__()
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        self.layer_norm = nn.LayerNorm(hidden_dim, dtype=dtype)
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim*4, dtype=dtype)
+        self.fc2 = nn.Linear(hidden_dim*4, hidden_dim, dtype=dtype)
+        self.relu = nn.ReLU()
+
+        he_normal_init_(self.fc1)
+        he_normal_init_(self.fc2)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
-        x = nn.LayerNorm(dtype=self.dtype)(x)
-        x = nn.Dense(
-            self.hidden_dim * 4, kernel_init=he_normal_init(), dtype=self.dtype
-        )(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim, kernel_init=he_normal_init(), dtype=self.dtype)(x)
+        x = self.layer_norm(x)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        
         return res + x

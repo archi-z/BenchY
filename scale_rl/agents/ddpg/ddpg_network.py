@@ -1,88 +1,120 @@
-from typing import Any
-
-import flax.linen as nn
-import jax.numpy as jnp
-from jax.lax import convert_element_type
+import torch
+import torch.nn as nn
 
 from scale_rl.networks.critics import LinearCritic
-from scale_rl.networks.layers import MLPBlock, ResidualBlock
 from scale_rl.networks.policies import TanhPolicy
-from scale_rl.networks.utils import orthogonal_init
+from scale_rl.networks.layers import MLPBlock, ResidualBlock
+from scale_rl.networks.utils import orthogonal_init_
 
 
-# Reference: https://arxiv.org/pdf/2002.04745
 class DDPGEncoder(nn.Module):
-    block_type: str
-    num_blocks: int
-    hidden_dim: int
-    dtype: Any
+    def __init__(
+        self,
+        block_type: str,
+        num_blocks: int,
+        input_dim: int,
+        hidden_dim: int,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+        self.block_type = block_type
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        if block_type == "mlp":
+            self.mlp = MLPBlock(
+                input_dim,
+                hidden_dim,
+                dtype=dtype
+            )
+
+        elif block_type == "residual":
+            self.fc = nn.Linear(input_dim, hidden_dim, dtype=dtype)
+            self.residual_blocks = nn.ModuleList([
+                ResidualBlock(hidden_dim, dtype=dtype) for _ in range(num_blocks)
+            ])
+            self.layer_norm = nn.LayerNorm(hidden_dim, dtype=dtype)
+
+            orthogonal_init_(self.fc)
+
+        else:
+            raise NotImplementedError(f"Unsupported block_type: {self.block_type}")
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.block_type == "mlp":
-            x = MLPBlock(self.hidden_dim, dtype=self.dtype)(x)
-
+            x = self.mlp(x)
         elif self.block_type == "residual":
-            x = nn.Dense(
-                self.hidden_dim, kernel_init=orthogonal_init(1), dtype=self.dtype
-            )(x)
-            for _ in range(self.num_blocks):
-                x = ResidualBlock(self.hidden_dim, dtype=self.dtype)(x)
-            x = nn.LayerNorm(dtype=self.dtype)(x)
-
+            x = self.fc(x)
+            for block in self.residual_blocks:
+                x = block(x)
+            x = self.layer_norm(x)
+        
         return x
 
 
 class DDPGActor(nn.Module):
-    block_type: str
-    num_blocks: int
-    hidden_dim: int
-    action_dim: int
-    dtype: Any
-
-    def setup(self):
-        self.encoder = DDPGEncoder(
-            block_type=self.block_type,
-            num_blocks=self.num_blocks,
-            hidden_dim=self.hidden_dim,
-            dtype=self.dtype,
-        )
-        self.predictor = TanhPolicy(self.action_dim)
-
-    def __call__(
+    def __init__(
         self,
-        observations: jnp.ndarray,
-    ) -> jnp.ndarray:
-        observations = convert_element_type(observations, self.dtype)
+        block_type: str,
+        num_blocks: int,
+        input_dim: int,
+        hidden_dim: int,
+        action_dim: int,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+        self.dtype = dtype
+
+        self.encoder = DDPGEncoder(
+            block_type=block_type,
+            num_blocks=num_blocks,
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            dtype=dtype
+        )
+        self.predictor=TanhPolicy(hidden_dim, action_dim)
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        observations = observations.to(dtype=self.dtype)
         z = self.encoder(observations)
         action = self.predictor(z)
+
         return action
 
 
 class DDPGCritic(nn.Module):
-    block_type: str
-    num_blocks: int
-    hidden_dim: int
-    dtype: Any
-
-    def setup(self):
-        self.encoder = DDPGEncoder(
-            block_type=self.block_type,
-            num_blocks=self.num_blocks,
-            hidden_dim=self.hidden_dim,
-            dtype=self.dtype,
-        )
-        self.predictor = LinearCritic()
-
-    def __call__(
+    def __init__(
         self,
-        observations: jnp.ndarray,
-        actions: jnp.ndarray,
-    ) -> jnp.ndarray:
-        inputs = jnp.concatenate((observations, actions), axis=1)
-        inputs = convert_element_type(inputs, self.dtype)
-        z = self.encoder(inputs)
+        block_type: str,
+        num_blocks: int,
+        input_dim: int,
+        hidden_dim: int,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+        self.dtype=dtype
+
+        self.encoder = DDPGEncoder(
+            block_type=block_type,
+            num_blocks=num_blocks,
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            dtype=dtype
+        )
+        self.predictor = LinearCritic(
+            input_dim=hidden_dim,
+            dtype=dtype
+        )
+
+    def forward(
+        self,
+        observations: torch.Tensor,
+        actions: torch.Tensor
+    ) -> torch.Tensor:
+        features = torch.cat((observations, actions), dim=1)
+        features = features.to(self.dtype)
+        z = self.encoder(features)
         q = self.predictor(z)
+
         return q
 
 
@@ -91,34 +123,33 @@ class DDPGClippedDoubleCritic(nn.Module):
     Vectorized Double-Q for Clipped Double Q-learning.
     https://arxiv.org/pdf/1802.09477v3
     """
-
-    block_type: str
-    num_blocks: int
-    hidden_dim: int
-    dtype: Any
-
-    num_qs: int = 2
-
-    @nn.compact
-    def __call__(
+    def __init__(
         self,
-        observations: jnp.ndarray,
-        actions: jnp.ndarray,
-    ) -> jnp.ndarray:
-        VmapCritic = nn.vmap(
-            DDPGCritic,
-            variable_axes={"params": 0},
-            split_rngs={"params": True},
-            in_axes=None,
-            out_axes=0,
-            axis_size=self.num_qs,
-        )
+        block_type: str,
+        num_blocks: int,
+        input_dim: int,
+        hidden_dim: int,
+        dtype: torch.dtype,
+        num_qs=2
+    ):
+        super().__init__()
+        self.critics = nn.ModuleList([
+            DDPGCritic(
+                block_type=block_type,
+                num_blocks=num_blocks,
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                dtype=dtype
+            ) for _ in range(num_qs)
+        ])
 
-        qs = VmapCritic(
-            block_type=self.block_type,
-            num_blocks=self.num_blocks,
-            hidden_dim=self.hidden_dim,
-            dtype=self.dtype,
-        )(observations, actions)
+    def forward(
+        self,
+        observations: torch.Tensor,
+        actions: torch.Tensor
+    ) -> torch.Tensor:
+        qs = [critic(observations, actions) for critic in self.critics]
+        qs = torch.stack(qs, dim=0)
 
         return qs
+    

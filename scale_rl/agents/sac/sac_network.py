@@ -8,7 +8,7 @@ from tensorflow_probability.substrates import jax as tfp
 from scale_rl.networks.critics import LinearCritic
 from scale_rl.networks.layers import MLPBlock, ResidualBlock
 from scale_rl.networks.policies import NormalTanhPolicy
-from scale_rl.networks.utils import orthogonal_init
+from scale_rl.networks.utils import orthogonal_init_
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -27,7 +27,7 @@ class SACEncoder(nn.Module):
 
         elif self.block_type == "residual":
             x = nn.Dense(
-                self.hidden_dim, kernel_init=orthogonal_init(1), dtype=self.dtype
+                self.hidden_dim, kernel_init=orthogonal_init_(1), dtype=self.dtype
             )(x)
             for _ in range(self.num_blocks):
                 x = ResidualBlock(self.hidden_dim, dtype=self.dtype)(x)

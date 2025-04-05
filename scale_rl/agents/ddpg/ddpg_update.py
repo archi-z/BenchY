@@ -1,139 +1,172 @@
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple, Union
 
-import flax
-import jax
-import jax.numpy as jnp
+import torch
 
 from scale_rl.buffers import Batch
-from scale_rl.networks.trainer import PRNGKey, Trainer
-from scale_rl.networks.utils import tree_norm
-
+from scale_rl.agents.ddpg.ddpg_network import (
+    DDPGActor,
+    DDPGClippedDoubleCritic,
+    DDPGCritic,
+)
 
 def update_actor(
-    key: PRNGKey,
-    actor: Trainer,
-    critic: Trainer,  # SACDoubleCritic
+    actor: DDPGActor,
+    critic: Union[DDPGCritic, DDPGClippedDoubleCritic],
     batch: Batch,
     critic_use_cdq: bool,
     noise_std: float,
-) -> Tuple[Trainer, Dict[str, float]]:
-    def actor_loss_fn(
-        actor_params: flax.core.FrozenDict[str, Any],
-    ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-        actions = actor.apply(
-            variables={"params": actor_params},
-            observations=batch["observation"],
-        )
-        noise = noise_std * jax.random.normal(key, shape=actions.shape)
-        actions = jnp.clip(actions + noise, -1.0, 1.0)
+    actor_optimizer: torch.optim.Optimizer,
+) -> Tuple[DDPGActor, Dict[str, float]]:
+    observations = batch['observation']
+    observations = torch.as_tensor(observations)
+    
+    actions = actor(observations)
+    noise = noise_std * torch.randn_like(actions)
+    noisy_actions = torch.clamp(actions+noise, -1.0, 1.0)
 
-        if critic_use_cdq:
-            q1, q2 = critic(observations=batch["observation"], actions=actions)
-            q = jnp.minimum(q1, q2).reshape(-1)  # (n, 1) -> (n, )
-        else:
-            q = critic(observations=batch["observation"], actions=actions)
-            q = q.reshape(-1)
+    if critic_use_cdq:
+        q1, q2 = critic(observations, noisy_actions)
+        q = torch.min(q1, q2).reshape(-1)
+    else:
+        q = critic(observations, noisy_actions).reshape(-1)
+    
+    actor_loss = -q.mean()
 
-        actor_loss = -q.mean()
-        actor_info = {
-            "actor_loss": actor_loss,
-            "actor_action": jnp.mean(jnp.abs(actions)),
-            "actor_pnorm": tree_norm(actor_params),
-        }
+    actor_optimizer.zero_grad()
+    actor_loss.backward()
+    
+    actor_pnorm = sum(p.norm(2).item() for p in actor.parameters())
+    actor_gnorm = sum(p.grad.norm(2).item() for p in actor.parameters() if p.grad is not None)
 
-        return actor_loss, actor_info
+    actor_optimizer.step()
 
-    actor, info = actor.apply_gradient(actor_loss_fn)
-    info["actor_gnorm"] = info.pop("grad_norm")
+    info = {
+        'actor_loss': actor_loss.item(),
+        'actor_action': torch.mean(torch.abs(noisy_actions)).item(),
+        'actor_pnorm': actor_pnorm,
+        'actor_gnorm': actor_gnorm
+    }
 
     return actor, info
 
 
 def update_critic(
-    key: PRNGKey,
-    actor: Trainer,
-    critic: Trainer,
-    target_critic: Trainer,
+    actor: DDPGActor,
+    critic: Union[DDPGCritic, DDPGClippedDoubleCritic],
+    target_critic: Union[DDPGCritic, DDPGClippedDoubleCritic],
     batch: Batch,
     gamma: float,
     n_step: int,
     critic_use_cdq: bool,
     noise_std: float,
-) -> Tuple[Trainer, Dict[str, float]]:
-    # compute the target q-value
-    next_actions = actor(observations=batch["next_observation"])
-    noise = noise_std * jax.random.normal(key, shape=next_actions.shape)
-    next_actions = jnp.clip(next_actions + noise, -1.0, 1.0)
+    critic_optimizer: torch.optim.Optimizer,
+) -> Tuple[Union[DDPGCritic, DDPGClippedDoubleCritic], Dict[str, float]]:
+    next_obs = batch['next_observation']
+    cur_obs = batch['observation']
+    actions = batch['action']
+    rewards = batch['reward']
+    terminated = batch['terminated']
+
+    with torch.no_grad():
+        next_actions = actor(next_obs)
+        noise = noise_std * torch.randn_like(next_actions)
+        next_actions = torch.clamp(next_actions+noise, -1.0, 1.0)
+
+        if critic_use_cdq:
+            next_q1, next_q2 = target_critic(next_obs, next_actions)
+            next_q = torch.min(next_q1, next_q2).reshape(-1)
+        else:
+            next_q = target_critic(next_obs, next_actions).reshape(-1)
+
+        target_q = rewards.reshape(-1) + (gamma ** n_step) * (1-terminated.reshape(-1).float()) * next_q
 
     if critic_use_cdq:
-        next_q1, next_q2 = target_critic(
-            observations=batch["next_observation"], actions=next_actions
-        )
-        next_q = jnp.minimum(next_q1, next_q2).reshape(-1)
+        pred_q1, pred_q2 = critic(cur_obs, actions)
+        pred_q1 = pred_q1.reshape(-1)
+        pred_q2 = pred_q2.reshape(-1)
+        critic_loss = ((pred_q1 - target_q) ** 2 + (pred_q2 - target_q) ** 2).mean()
     else:
-        next_q = target_critic(
-            observations=batch["next_observation"],
-            actions=next_actions,
-        ).reshape(-1)
+        pred_q = critic(cur_obs, actions).reshape(-1)
+        pred_q1 = pred_q2 = pred_q
+        critic_loss = ((pred_q - target_q) ** 2).mean()
+    
+    critic_optimizer.zero_grad()
+    critic_loss.backward()
 
-    # compute the td-target, incorporating the n-step accumulated reward
-    # https://gymnasium.farama.org/tutorials/gymnasium_basics/handling_time_limits/
-    target_q = batch["reward"] + (gamma**n_step) * (1 - batch["terminated"]) * next_q
+    critic_pnorm = sum(p.norm(2).item() for p in critic.parameters())
+    critic_gnorm = sum(p.grad.norm(2).item() for p in critic.parameters() if p.grad is not None)
 
-    def critic_loss_fn(
-        critic_params: flax.core.FrozenDict[str, Any],
-    ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-        # compute predicted q-value
-        if critic_use_cdq:
-            pred_q1, pred_q2 = critic.apply(
-                variables={"params": critic_params},
-                observations=batch["observation"],
-                actions=batch["action"],
-            )
-            pred_q1 = pred_q1.reshape(-1)
-            pred_q2 = pred_q2.reshape(-1)
+    critic_optimizer.step()
 
-            # compute mse loss
-            critic_loss = ((pred_q1 - target_q) ** 2 + (pred_q2 - target_q) ** 2).mean()
-        else:
-            pred_q = critic.apply(
-                variables={"params": critic_params},
-                observations=batch["observation"],
-                actions=batch["action"],
-            ).reshape(-1)
-            pred_q1 = pred_q2 = pred_q
-
-            # compute mse loss
-            critic_loss = ((pred_q - target_q) ** 2).mean()
-
-        critic_info = {
-            "critic_loss": critic_loss,
-            "q1_mean": pred_q1.mean(),
-            "q2_mean": pred_q2.mean(),
-            "rew_mean": batch["reward"].mean(),
-            "critic_pnorm": tree_norm(critic_params),
-        }
-
-        return critic_loss, critic_info
-
-    critic, info = critic.apply_gradient(critic_loss_fn)
-    info["critic_gnorm"] = info.pop("grad_norm")
+    info = {
+        "critic_loss": critic_loss.item(),
+        "q1_mean": pred_q1.mean().item(),
+        "q2_mean": pred_q2.mean().item(),
+        "rew_mean": rewards.mean().item(),
+        "critic_pnorm": critic_pnorm,
+        "critic_gnorm": critic_gnorm,
+    }
 
     return critic, info
 
 
 def update_target_network(
-    network: Trainer,
-    target_network: Trainer,
+    network: Union[DDPGCritic, DDPGClippedDoubleCritic],
+    target_network: Union[DDPGCritic, DDPGClippedDoubleCritic],
     target_tau: float,
-) -> Tuple[Trainer, Dict[str, float]]:
-    new_target_params = jax.tree_map(
-        lambda p, tp: p * target_tau + tp * (1 - target_tau),
-        network.params,
-        target_network.params,
-    )
-
-    target_network = target_network.replace(params=new_target_params)
+) -> Tuple[Union[DDPGCritic, DDPGClippedDoubleCritic], Dict[str, float]]:
+    with torch.no_grad():
+        for target_param, param in zip(target_network.parameters(), network.parameters()):
+            target_param.copy_(target_tau*param + (1-target_tau)*target_param)
     info = {}
 
     return target_network, info
+
+
+def update_ddpg_networks(
+    actor: DDPGActor,
+    critic: Union[DDPGCritic, DDPGClippedDoubleCritic],
+    target_critic: Union[DDPGCritic, DDPGClippedDoubleCritic],
+    actor_optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
+    batch: Batch,
+    gamma: float,
+    n_step: int,
+    critic_use_cdq: bool,
+    target_tau: float,
+    noise_std: float
+):
+    new_actor, actor_info = update_actor(
+        actor=actor,
+        critic=critic,
+        batch=batch,
+        critic_use_cdq=critic_use_cdq,
+        noise_std=noise_std,
+        actor_optimizer=actor_optimizer
+    )
+
+    new_critic, critic_info = update_critic(
+        actor=actor,
+        critic=critic,
+        target_critic=target_critic,
+        batch=batch,
+        gamma=gamma,
+        n_step=n_step,
+        critic_use_cdq=critic_use_cdq,
+        noise_std=noise_std,
+        critic_optimizer=critic_optimizer
+    )
+
+    new_target_critic, target_critic_info = update_target_network(
+        network=new_critic,
+        target_network=target_critic,
+        target_tau=target_tau
+    )
+
+    info = {
+        **actor_info,
+        **critic_info,
+        **target_critic_info
+    }
+
+    return new_actor, new_critic, new_target_critic, info
