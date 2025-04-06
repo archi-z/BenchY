@@ -2,7 +2,7 @@
 # Common
 ##################################################################################
 
-project_name: 'simba'
+project_name: 'BenchY'
 group_name: 'test'
 exp_name: 'test'
 seed: 0
@@ -11,6 +11,8 @@ server: 'local'
 ##################################################################################
 # Training
 ##################################################################################
+
+device: 'cuda' # [cuda, cpu]
 
 # gamma value is set with a heuristic from TD-MPCv2
 eff_episode_len: ${eval:'${env.max_episode_steps} / ${env.action_repeat}'}
@@ -31,6 +33,6 @@ num_record_episodes: 1
 
 defaults:
 - _self_
-- agent: sac_simba
-- buffer: numpy_uniform
+- agent: ddpg
+- buffer: torch_uniform
 - env: dmc_hard

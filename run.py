@@ -6,6 +6,7 @@ import numpy as np
 import omegaconf
 import tqdm
 from dotmap import DotMap
+import torch
 
 from scale_rl.agents import create_agent
 from scale_rl.buffers import create_buffer
@@ -32,6 +33,9 @@ def run(args):
 
     omegaconf.OmegaConf.register_new_resolver("eval", eval_resolver)
     omegaconf.OmegaConf.resolve(cfg)
+    cfg.device = \
+        cfg.agent.device = \
+            cfg.buffer.device = 'cuda' if torch.cuda.is_available() and cfg.device=='cuda' else 'cpu'
 
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
@@ -93,6 +97,7 @@ def run(args):
             actions = agent.sample_actions(
                 interaction_step, prev_timestep=timestep, training=True
             )
+            actions = actions.cpu().numpy()
         if buffer.can_sample() is False:
             actions = train_env.action_space.sample()
 

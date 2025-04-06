@@ -35,6 +35,7 @@ def evaluate(
                 prev_timestep=prev_timestep,
                 training=False,
             )
+            actions = actions.cpu().numpy()
             next_observations, rewards, terminateds, truncateds, infos = env.step(
                 actions
             )
@@ -105,6 +106,7 @@ def record_video(
                 prev_timestep=prev_timestep,
                 training=False,
             )
+            actions = actions.cpu().numpy()
             next_observations, rewards, terminateds, truncateds, infos = env.step(
                 actions
             )

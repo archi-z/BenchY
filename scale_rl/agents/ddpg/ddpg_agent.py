@@ -47,12 +47,14 @@ class DDPGConfig:
     exp_noise_std_final: float
 
     mixed_precision: bool
+    device: str
 
 
 def _init_ddpg_networks(
     observation_dim: int,
     action_dim: int,
-    cfg: DDPGConfig
+    cfg: DDPGConfig,
+    device: torch.device
 ) -> Tuple[
     DDPGActor,
     Union[DDPGCritic, DDPGClippedDoubleCritic],
@@ -67,7 +69,7 @@ def _init_ddpg_networks(
             hidden_dim=cfg.actor_hidden_dim,
             action_dim=action_dim,
             dtype=compute_dtype
-        )
+        ).to(device)
     
     if cfg.critic_use_cdq:
         critic = DDPGClippedDoubleCritic(
@@ -76,14 +78,14 @@ def _init_ddpg_networks(
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
             dtype=compute_dtype
-        )
+        ).to(device)
         target_critic = DDPGClippedDoubleCritic(
             block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
             dtype=compute_dtype
-        )
+        ).to(device)
 
     else:
         critic = DDPGCritic(
@@ -92,14 +94,14 @@ def _init_ddpg_networks(
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
             dtype=compute_dtype
-        )
+        ).to(device)
         target_critic = DDPGCritic(
             block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
             dtype=compute_dtype
-        )
+        ).to(device)
 
     return actor, critic, target_critic
 
@@ -120,6 +122,7 @@ class DDPGAgent(BaseAgent):
         self._observation_dim = observation_space.shape[-1]
         self._action_dim = action_space.shape[-1]
         self._cfg = DDPGConfig(**cfg)
+        self._device = torch.device(self._cfg.device)
     
         self._init_network()
         self._init_exp_scheduler()
@@ -133,7 +136,7 @@ class DDPGAgent(BaseAgent):
             self._actor,
             self._critic,
             self._target_critic,
-        ) = _init_ddpg_networks(self._observation_dim, self._action_dim, self._cfg)
+        ) = _init_ddpg_networks(self._observation_dim, self._action_dim, self._cfg, self._device)
 
     def _init_exp_scheduler(self):
         if self._cfg.exp_noise_scheduler == "linear":
@@ -163,7 +166,7 @@ class DDPGAgent(BaseAgent):
         interaction_step: int,
         prev_timestep: Dict[str, np.ndarray],
         training: bool
-    ) -> np.ndarray:
+    ) -> torch.Tensor:
         if training:
             # reinitialize the noise if env was reinitialized
             prev_terminated = prev_timestep["terminated"]
@@ -186,10 +189,10 @@ class DDPGAgent(BaseAgent):
 
         with torch.no_grad():
             # current timestep observation is "next" observations from the previous timestep
-            observations = torch.as_tensor(prev_timestep["next_observation"])
+            observations = torch.as_tensor(prev_timestep["next_observation"]).to(self._device)
             actions = self._actor(observations)
-            actions = np.array(actions)
-            actions = np.clip(actions+action_noise, -1, 1)
+            action_noise = torch.as_tensor(action_noise, device=self._device)
+            actions = torch.clamp(actions+action_noise, -1.0, 1.0)
 
         return actions
 

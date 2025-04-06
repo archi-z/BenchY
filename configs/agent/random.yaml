@@ -4,5 +4,6 @@
 
 agent_type: 'random'
 
+device: {device}
 seed: ${seed}
 normalize_observation: False
