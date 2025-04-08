@@ -77,10 +77,11 @@ def run(args):
     logger = WandbTrainerLogger(cfg)
 
     # initial evaluation
-    eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
-    logger.update_metric(**eval_info)
-    logger.log_metric(step=0)
-    logger.reset()
+    with torch.no_grad():
+        eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
+        logger.update_metric(**eval_info)
+        logger.log_metric(step=0)
+        logger.reset()
 
     # start training
     update_step = 0
@@ -136,22 +137,23 @@ def run(args):
                 update_counter -= 1
                 update_step += 1
 
-            # evaluation
-            if interaction_step % cfg.evaluation_per_interaction_step == 0:
-                eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
-                logger.update_metric(**eval_info)
+            with torch.no_grad():
+                # evaluation
+                if interaction_step % cfg.evaluation_per_interaction_step == 0:
+                    eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
+                    logger.update_metric(**eval_info)
 
-            # video recording
-            if interaction_step % cfg.recording_per_interaction_step == 0:
-                video_info = record_video(agent, eval_env, cfg.num_record_episodes)
-                logger.update_metric(**video_info)
+                # video recording
+                if interaction_step % cfg.recording_per_interaction_step == 0:
+                    video_info = record_video(agent, eval_env, cfg.num_record_episodes)
+                    logger.update_metric(**video_info)
 
-            # logging
-            if interaction_step % cfg.logging_per_interaction_step == 0:
-                # using env steps simplifies the comparison with the performance reported in the paper.
-                env_step = interaction_step * cfg.action_repeat * cfg.num_train_envs
-                logger.log_metric(step=env_step)
-                logger.reset()
+                # logging
+                if interaction_step % cfg.logging_per_interaction_step == 0:
+                    # using env steps simplifies the comparison with the performance reported in the paper.
+                    env_step = interaction_step * cfg.action_repeat * cfg.num_train_envs
+                    logger.log_metric(step=env_step)
+                    logger.reset()
 
     train_env.close()
     eval_env.close()

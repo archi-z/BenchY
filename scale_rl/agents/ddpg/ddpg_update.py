@@ -5,8 +5,8 @@ import torch
 from scale_rl.buffers import Batch
 from scale_rl.agents.ddpg.ddpg_network import (
     DDPGActor,
-    DDPGClippedDoubleCritic,
     DDPGCritic,
+    DDPGClippedDoubleCritic
 )
 
 def update_actor(
@@ -15,20 +15,19 @@ def update_actor(
     batch: Batch,
     critic_use_cdq: bool,
     noise_std: float,
-    actor_optimizer: torch.optim.Optimizer,
+    actor_optimizer: torch.optim.Optimizer
 ) -> Tuple[DDPGActor, Dict[str, float]]:
     observations = batch['observation']
-    observations = torch.as_tensor(observations)
     
     actions = actor(observations)
     noise = noise_std * torch.randn_like(actions)
-    noisy_actions = torch.clamp(actions+noise, -1.0, 1.0)
+    actions = (actions+noise).clamp(-1.0, 1.0)
 
     if critic_use_cdq:
-        q1, q2 = critic(observations, noisy_actions)
+        q1, q2 = critic(observations, actions)
         q = torch.min(q1, q2).reshape(-1)
     else:
-        q = critic(observations, noisy_actions).reshape(-1)
+        q = critic(observations, actions).reshape(-1)
     
     actor_loss = -q.mean()
 
@@ -42,7 +41,7 @@ def update_actor(
 
     info = {
         'actor_loss': actor_loss.item(),
-        'actor_action': torch.mean(torch.abs(noisy_actions)).item(),
+        'actor_action': actions.abs().mean().item(),
         'actor_pnorm': actor_pnorm,
         'actor_gnorm': actor_gnorm
     }
@@ -59,7 +58,7 @@ def update_critic(
     n_step: int,
     critic_use_cdq: bool,
     noise_std: float,
-    critic_optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer
 ) -> Tuple[Union[DDPGCritic, DDPGClippedDoubleCritic], Dict[str, float]]:
     next_obs = batch['next_observation']
     cur_obs = batch['observation']
@@ -70,7 +69,7 @@ def update_critic(
     with torch.no_grad():
         next_actions = actor(next_obs)
         noise = noise_std * torch.randn_like(next_actions)
-        next_actions = torch.clamp(next_actions+noise, -1.0, 1.0)
+        next_actions = (next_actions+noise).clamp(-1.0, 1.0)
 
         if critic_use_cdq:
             next_q1, next_q2 = target_critic(next_obs, next_actions)
@@ -78,7 +77,7 @@ def update_critic(
         else:
             next_q = target_critic(next_obs, next_actions).reshape(-1)
 
-        target_q = rewards.reshape(-1) + (gamma ** n_step) * (1-terminated.reshape(-1).float()) * next_q
+        target_q = rewards + (gamma**n_step) * (1-terminated) * next_q
 
     if critic_use_cdq:
         pred_q1, pred_q2 = critic(cur_obs, actions)
@@ -99,12 +98,12 @@ def update_critic(
     critic_optimizer.step()
 
     info = {
-        "critic_loss": critic_loss.item(),
-        "q1_mean": pred_q1.mean().item(),
-        "q2_mean": pred_q2.mean().item(),
-        "rew_mean": rewards.mean().item(),
-        "critic_pnorm": critic_pnorm,
-        "critic_gnorm": critic_gnorm,
+        'critic_loss': critic_loss.item(),
+        'q1_mean': pred_q1.mean().item(),
+        'q2_mean': pred_q2.mean().item(),
+        'rew_mean': rewards.mean().item(),
+        'critic_pnorm': critic_pnorm,
+        'critic_gnorm': critic_gnorm,
     }
 
     return critic, info

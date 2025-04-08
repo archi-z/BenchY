@@ -71,7 +71,7 @@ class DDPGActor(nn.Module):
             hidden_dim=hidden_dim,
             dtype=dtype
         )
-        self.predictor=TanhPolicy(hidden_dim, action_dim)
+        self.predictor=TanhPolicy(hidden_dim, action_dim, dtype=dtype)
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         observations = observations.to(dtype=self.dtype)
@@ -91,7 +91,7 @@ class DDPGCritic(nn.Module):
         dtype: torch.dtype
     ):
         super().__init__()
-        self.dtype=dtype
+        self.dtype = dtype
 
         self.encoder = DDPGEncoder(
             block_type=block_type,
@@ -111,7 +111,7 @@ class DDPGCritic(nn.Module):
         actions: torch.Tensor
     ) -> torch.Tensor:
         features = torch.cat((observations, actions), dim=1)
-        features = features.to(self.dtype)
+        features = features.to(dtype=self.dtype)
         z = self.encoder(features)
         q = self.predictor(z)
 
@@ -133,6 +133,7 @@ class DDPGClippedDoubleCritic(nn.Module):
         num_qs=2
     ):
         super().__init__()
+        
         self.critics = nn.ModuleList([
             DDPGCritic(
                 block_type=block_type,

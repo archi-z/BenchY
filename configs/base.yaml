@@ -33,6 +33,6 @@ num_record_episodes: 1
 
 defaults:
 - _self_
-- agent: ddpg
+- agent: sac
 - buffer: torch_uniform
 - env: dmc_hard

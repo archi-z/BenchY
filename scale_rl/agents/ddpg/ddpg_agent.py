@@ -1,5 +1,6 @@
 from typing import Dict, Tuple, Union
 from dataclasses import dataclass
+import copy
 
 import gymnasium as gym
 import numpy as np
@@ -8,8 +9,8 @@ import torch
 from scale_rl.agents.base_agent import BaseAgent
 from scale_rl.agents.ddpg.ddpg_network import (
     DDPGActor,
-    DDPGClippedDoubleCritic,
     DDPGCritic,
+    DDPGClippedDoubleCritic
 )
 from scale_rl.agents.ddpg.ddpg_update import update_ddpg_networks
 from scale_rl.common.colored_noise import ColoredNoiseProcess
@@ -56,9 +57,9 @@ def _init_ddpg_networks(
     cfg: DDPGConfig,
     device: torch.device
 ) -> Tuple[
-    DDPGActor,
-    Union[DDPGCritic, DDPGClippedDoubleCritic],
-    Union[DDPGCritic, DDPGClippedDoubleCritic],
+        DDPGActor,
+        Union[DDPGCritic, DDPGClippedDoubleCritic],
+        Union[DDPGCritic, DDPGClippedDoubleCritic],
     ]:
     compute_dtype = torch.float16 if cfg.mixed_precision else torch.float32
 
@@ -79,13 +80,6 @@ def _init_ddpg_networks(
             hidden_dim=cfg.critic_hidden_dim,
             dtype=compute_dtype
         ).to(device)
-        target_critic = DDPGClippedDoubleCritic(
-            block_type=cfg.critic_block_type,
-            num_blocks=cfg.critic_num_blocks,
-            input_dim=observation_dim+action_dim,
-            hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype
-        ).to(device)
 
     else:
         critic = DDPGCritic(
@@ -95,13 +89,8 @@ def _init_ddpg_networks(
             hidden_dim=cfg.critic_hidden_dim,
             dtype=compute_dtype
         ).to(device)
-        target_critic = DDPGCritic(
-            block_type=cfg.critic_block_type,
-            num_blocks=cfg.critic_num_blocks,
-            input_dim=observation_dim+action_dim,
-            hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype
-        ).to(device)
+
+    target_critic = copy.deepcopy(critic)
 
     return actor, critic, target_critic
 
@@ -192,7 +181,7 @@ class DDPGAgent(BaseAgent):
             observations = torch.as_tensor(prev_timestep["next_observation"]).to(self._device)
             actions = self._actor(observations)
             action_noise = torch.as_tensor(action_noise, device=self._device)
-            actions = torch.clamp(actions+action_noise, -1.0, 1.0)
+            actions = (actions+action_noise).clamp(-1.0, 1.0)
 
         return actions
 
@@ -201,9 +190,6 @@ class DDPGAgent(BaseAgent):
         update_step: int,
         batch: Dict[str, np.ndarray]
     ) -> Dict:
-        for key, value in batch.items():
-            batch[key] = torch.as_tensor(value)
-
         (
             self._actor,
             self._critic,
