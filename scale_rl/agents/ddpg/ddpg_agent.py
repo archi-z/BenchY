@@ -117,8 +117,16 @@ class DDPGAgent(BaseAgent):
         self._init_exp_scheduler()
         self._init_action_noise()
 
-        self._actor_optimizer = torch.optim.AdamW(self._actor.parameters(),lr=self._cfg.actor_learning_rate)
-        self._critic_optimizer = torch.optim.AdamW(self._critic.parameters(), lr=self._cfg.critic_learning_rate)
+        self._actor_optimizer = torch.optim.AdamW(
+            self._actor.parameters(),
+            lr=self._cfg.actor_learning_rate,
+            weight_decay=self._cfg.actor_weight_decay
+        )
+        self._critic_optimizer = torch.optim.AdamW(
+            self._critic.parameters(),
+            lr=self._cfg.critic_learning_rate,
+            weight_decay=self._cfg.critic_weight_decay
+        )
 
     def _init_network(self):
         (

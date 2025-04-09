@@ -118,9 +118,21 @@ class SACAgent(BaseAgent):
 
         self._init_network()
 
-        self._actor_optimizer = torch.optim.AdamW(self._actor.parameters(),lr=self._cfg.actor_learning_rate)
-        self._critic_optimizer = torch.optim.AdamW(self._critic.parameters(), lr=self._cfg.critic_learning_rate)
-        self._temp_optimizer = torch.optim.AdamW(self._temperature.parameters(), lr=self._cfg.temp_learning_rate)
+        self._actor_optimizer = torch.optim.AdamW(
+            self._actor.parameters(),
+            lr=self._cfg.actor_learning_rate,
+            weight_decay=self._cfg.actor_weight_decay
+        )
+        self._critic_optimizer = torch.optim.AdamW(
+            self._critic.parameters(),
+            lr=self._cfg.critic_learning_rate,
+            weight_decay=self._cfg.critic_weight_decay
+        )
+        self._temp_optimizer = torch.optim.AdamW(
+            self._temperature.parameters(),
+            lr=self._cfg.temp_learning_rate,
+            weight_decay=self._cfg.temp_weight_decay
+        )
 
     def _init_network(self):
         (
