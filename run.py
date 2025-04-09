@@ -10,7 +10,7 @@ import torch
 
 from scale_rl.agents import create_agent
 from scale_rl.buffers import create_buffer
-from scale_rl.common import WandbTrainerLogger
+from scale_rl.common import WandbTrainerLogger, set_seed
 from scale_rl.envs import create_envs
 from scale_rl.evaluation import evaluate, record_video
 
@@ -37,8 +37,7 @@ def run(args):
         cfg.agent.device = \
             cfg.buffer.device = 'cuda' if torch.cuda.is_available() and cfg.device=='cuda' else 'cpu'
 
-    np.random.seed(cfg.seed)
-    random.seed(cfg.seed)
+    set_seed(cfg.seed)
 
     #############################
     # envs
@@ -163,7 +162,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--config_path", type=str, default="./configs")
     parser.add_argument("--config_name", type=str, default="base")
-    parser.add_argument("--overrides", action="append", default=[])
+    parser.add_argument("--overrides", nargs="+", default=[])
     args = parser.parse_args()
 
     run(vars(args))
