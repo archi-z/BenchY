@@ -14,6 +14,7 @@ class WandbTrainerLogger(object):
             project=cfg.project_name,
             group=cfg.group_name,
             config=dict_cfg,
+            name=cfg.exp_name
         )
 
         self.reset()

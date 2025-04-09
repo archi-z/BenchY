@@ -41,7 +41,6 @@ class SACEncoder(nn.Module):
         else:
             raise NotImplementedError(f"Unsupported block_type: {self.block_type}")
 
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.block_type == "mlp":
             x = self.mlp(x)
