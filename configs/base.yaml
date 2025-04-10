@@ -4,7 +4,7 @@
 
 project_name: 'BenchY'
 group_name: ${agent.agent_type}_${env.env_name}_RR=${updates_per_interaction_step}_arch=${agent.critic_block_type}
-exp_name: seed=${seed}_AD=${agent.actor_num_blocks}_AW=${agent.actor_hidden_dim}_CD=${agent.critic_num_blocks}_CW=${agent.critic_hidden_dim}
+exp_name: seed=${seed}_${agent.agent_type}_${env.env_name}_${agent.critic_block_type}_AD=${agent.actor_num_blocks}_AW=${agent.actor_hidden_dim}_CD=${agent.critic_num_blocks}_CW=${agent.critic_hidden_dim}
 seed: 0
 server: 'local'
 

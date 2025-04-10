@@ -22,7 +22,7 @@ def update_actor(
     observations = batch['observation']
     
     dist = actor(observations)
-    actions = dist.sample()
+    actions = dist.rsample()
     log_probs = dist.log_prob(actions)
 
     if critic_use_cdq:
@@ -180,7 +180,7 @@ def update_sac_networks(
 
     new_temperature, temperature_info = update_temperature(
         temperature=temperature,
-        entropy=actor_info['entropy'],
+        entropy=actor_info['train/entropy'],
         target_entropy=temp_target_entropy,
         temp_optimizer=temp_optimizer
     )
