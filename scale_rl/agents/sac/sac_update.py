@@ -1,164 +1,213 @@
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple, Union
 
-import flax
-import jax
-import jax.numpy as jnp
+import torch
 
 from scale_rl.buffers import Batch
-from scale_rl.networks.trainer import PRNGKey, Trainer
-from scale_rl.networks.utils import tree_norm
+from scale_rl.agents.sac.sac_network import (
+    SACActor,
+    SACCritic,
+    SACClippedDoubleCritic,
+    SACTemperature
+)
 
 
 def update_actor(
-    key: PRNGKey,
-    actor: Trainer,
-    critic: Trainer,  # SACDoubleCritic
-    temperature: Trainer,
+    actor: SACActor,
+    critic: Union[SACCritic, SACClippedDoubleCritic],
+    temperature: SACTemperature,
     batch: Batch,
     critic_use_cdq: bool,
-) -> Tuple[Trainer, Dict[str, float]]:
-    def actor_loss_fn(
-        actor_params: flax.core.FrozenDict[str, Any],
-    ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-        dist = actor.apply(
-            variables={"params": actor_params},
-            observations=batch["observation"],
-        )
+    actor_optimizer: torch.optim.Optimizer
+) -> Tuple[SACActor, Dict[str, float]]:
+    observations = batch['observation']
+    
+    dist = actor(observations)
+    actions = dist.rsample()
+    log_probs = dist.log_prob(actions)
 
-        actions = dist.sample(seed=key)
-        log_probs = dist.log_prob(actions)
+    if critic_use_cdq:
+        q1, q2 = critic(observations, actions)
+        q = torch.min(q1, q2).reshape(-1)
+    else:
+        q = critic(observations, actions).reshape(-1)
 
-        if critic_use_cdq:
-            q1, q2 = critic(observations=batch["observation"], actions=actions)
-            q = jnp.minimum(q1, q2).reshape(-1)  # (n, 1) -> (n, )
-        else:
-            q = critic(observations=batch["observation"], actions=actions)
-            q = q.reshape(-1)  # (n, 1) -> (n, )
+    actor_loss = (log_probs * temperature() - q).mean()
 
-        actor_loss = (log_probs * temperature() - q).mean()
-        actor_info = {
-            "actor_loss": actor_loss,
-            "entropy": -log_probs.mean(),  # not exactly entropy, just calculating randomness
-            "actor_action": jnp.mean(jnp.abs(actions)),
-            "actor_pnorm": tree_norm(actor_params),
-        }
+    actor_optimizer.zero_grad()
+    actor_loss.backward()
 
-        return actor_loss, actor_info
+    actor_pnorm = sum(p.norm(2).item() for p in actor.parameters())
+    actor_gnorm = sum(p.grad.norm(2).item() for p in actor.parameters() if p.grad is not None)
 
-    actor, info = actor.apply_gradient(actor_loss_fn)
-    info["actor_gnorm"] = info.pop("grad_norm")
+    actor_optimizer.step()
+
+    info = {
+        'train/actor_loss': actor_loss.item(),
+        'train/entropy': -log_probs.mean().item(),
+        'train/actor_action': actions.abs().mean().item(),
+        'train/actor_pnorm': actor_pnorm,
+        'train/actor_gnorm': actor_gnorm
+    }
 
     return actor, info
 
 
 def update_critic(
-    key: PRNGKey,
-    actor: Trainer,
-    critic: Trainer,
-    target_critic: Trainer,
-    temperature: Trainer,
+    actor: SACActor,
+    critic: Union[SACCritic, SACClippedDoubleCritic],
+    target_critic: Union[SACCritic, SACClippedDoubleCritic],
+    temperature: SACTemperature,
     batch: Batch,
     gamma: float,
     n_step: int,
     critic_use_cdq: bool,
-) -> Tuple[Trainer, Dict[str, float]]:
-    # compute the target q-value
-    next_dist = actor(observations=batch["next_observation"])
-    next_actions = next_dist.sample(seed=key)
-    next_log_probs = next_dist.log_prob(next_actions)
-    if critic_use_cdq:
-        next_q1, next_q2 = target_critic(
-            observations=batch["next_observation"], actions=next_actions
-        )
-        next_q = jnp.minimum(next_q1, next_q2).reshape(-1)
-    else:
-        next_q = target_critic(
-            observations=batch["next_observation"],
-            actions=next_actions,
-        ).reshape(-1)
+    critic_optimizer: torch.optim.Optimizer
+) -> Tuple[Union[SACCritic, SACClippedDoubleCritic], Dict[str, float]]:
+    next_obs = batch['next_observation']
+    cur_obs = batch['observation']
+    actions = batch['action']
+    rewards = batch['reward']
+    terminated = batch['terminated']
 
-    # compute the td-target, incorporating the n-step accumulated reward
-    # https://gymnasium.farama.org/tutorials/gymnasium_basics/handling_time_limits/
-    target_q = batch["reward"] + (gamma**n_step) * (1 - batch["terminated"]) * next_q
-    target_q -= (
-        (gamma**n_step) * (1 - batch["terminated"]) * temperature() * next_log_probs
-    )
+    with torch.no_grad():
+        next_dist = actor(next_obs)
+        next_actions = next_dist.sample()
+        next_log_probs = next_dist.log_prob(next_actions)
 
-    def critic_loss_fn(
-        critic_params: flax.core.FrozenDict[str, Any],
-    ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-        # compute predicted q-value
         if critic_use_cdq:
-            pred_q1, pred_q2 = critic.apply(
-                variables={"params": critic_params},
-                observations=batch["observation"],
-                actions=batch["action"],
-            )
-            pred_q1 = pred_q1.reshape(-1)
-            pred_q2 = pred_q2.reshape(-1)
-
-            # compute mse loss
-            critic_loss = ((pred_q1 - target_q) ** 2 + (pred_q2 - target_q) ** 2).mean()
+            next_q1, next_q2 = target_critic(next_obs, next_actions)
+            next_q = torch.min(next_q1, next_q2).reshape(-1)
         else:
-            pred_q = critic.apply(
-                variables={"params": critic_params},
-                observations=batch["observation"],
-                actions=batch["action"],
-            ).reshape(-1)
-            pred_q1 = pred_q2 = pred_q
+            next_q = target_critic(next_obs, next_actions).reshape(-1)
+        
+        target_q = rewards + (gamma**n_step) * (1-terminated) * next_q
+        target_q -= (
+            (gamma**n_step) * (1 - terminated) *
+            temperature() * next_log_probs
+        )
 
-            # compute mse loss
-            critic_loss = ((pred_q - target_q) ** 2).mean()
+    if critic_use_cdq:
+        pred_q1, pred_q2 = critic(cur_obs, actions)
+        pred_q1 = pred_q1.reshape(-1)
+        pred_q2 = pred_q2.reshape(-1)
+        critic_loss = ((pred_q1 - target_q) ** 2 + (pred_q2 - target_q) ** 2).mean()
+    else:
+        pred_q = critic(cur_obs, actions).reshape(-1)
+        pred_q1 = pred_q2 = pred_q
+        critic_loss = ((pred_q - target_q) ** 2).mean()
+    
+    critic_optimizer.zero_grad()
+    critic_loss.backward()
 
-        critic_info = {
-            "critic_loss": critic_loss,
-            "q1_mean": pred_q1.mean(),
-            "q2_mean": pred_q2.mean(),
-            "rew_mean": batch["reward"].mean(),
-            "critic_pnorm": tree_norm(critic_params),
-        }
+    critic_pnorm = sum(p.norm(2).item() for p in critic.parameters())
+    critic_gnorm = sum(p.grad.norm(2).item() for p in critic.parameters() if p.grad is not None)
 
-        return critic_loss, critic_info
+    critic_optimizer.step()
 
-    critic, info = critic.apply_gradient(critic_loss_fn)
-    info["critic_gnorm"] = info.pop("grad_norm")
+    info = {
+        'train/critic_loss': critic_loss.item(),
+        'train/q1_mean': pred_q1.mean().item(),
+        'train/q2_mean': pred_q2.mean().item(),
+        'train/rew_mean': rewards.mean().item(),
+        'train/critic_pnorm': critic_pnorm,
+        'train/critic_gnorm': critic_gnorm,
+    }
 
     return critic, info
 
 
 def update_target_network(
-    network: Trainer,  # SACDoubleCritic
-    target_network: Trainer,
+    network: Union[SACCritic, SACClippedDoubleCritic],
+    target_network: Union[SACCritic, SACClippedDoubleCritic],
     target_tau: float,
-) -> Tuple[Trainer, Dict[str, float]]:
-    new_target_params = jax.tree_map(
-        lambda p, tp: p * target_tau + tp * (1 - target_tau),
-        network.params,
-        target_network.params,
-    )
-
-    target_network = target_network.replace(params=new_target_params)
+) -> Tuple[Union[SACCritic, SACClippedDoubleCritic], Dict[str, float]]:
+    with torch.no_grad():
+        for target_param, param in zip(target_network.parameters(), network.parameters()):
+            target_param.copy_(target_tau*param + (1-target_tau)*target_param)
     info = {}
 
     return target_network, info
 
 
 def update_temperature(
-    temperature: Trainer, entropy: float, target_entropy: float
-) -> Tuple[Trainer, Dict[str, float]]:
-    def temperature_loss_fn(
-        temperature_params: flax.core.FrozenDict[str, Any],
-    ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-        temperature_value = temperature.apply({"params": temperature_params})
-        temperature_loss = temperature_value * (entropy - target_entropy).mean()
-        temperature_info = {
-            "temperature": temperature_value,
-            "temperature_loss": temperature_loss,
-        }
+    temperature: SACTemperature,
+    entropy: float,
+    target_entropy: float,
+    temp_optimizer: torch.optim.Optimizer
+) -> Tuple[SACTemperature, Dict[str, float]]:
+    temperature_value = temperature()
+    temperature_loss = temperature_value * (entropy - target_entropy)
 
-        return temperature_loss, temperature_info
+    temp_optimizer.zero_grad()
+    temperature_loss.backward()
 
-    temperature, info = temperature.apply_gradient(temperature_loss_fn)
-    info["temperature_gnorm"] = info.pop("grad_norm")
+    temperature_gnorm = sum(p.grad.norm(2).item() for p in temperature.parameters() if p.grad is not None)
+
+    temp_optimizer.step()
+
+    info = {
+        'train/temperature': temperature_value.item(),
+        'train/temperature_loss': temperature_loss.item(),
+        'train/temperature_gnorm': temperature_gnorm
+    }
 
     return temperature, info
+
+
+def update_sac_networks(
+    actor: SACActor,
+    critic: Union[SACCritic, SACClippedDoubleCritic],
+    target_critic: Union[SACCritic, SACClippedDoubleCritic],
+    temperature: SACTemperature,
+    actor_optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
+    temp_optimizer: torch.optim.Optimizer,
+    batch: Batch,
+    gamma: float,
+    n_step: int,
+    critic_use_cdq: bool,
+    target_tau: float,
+    temp_target_entropy: float
+):
+    new_actor, actor_info = update_actor(
+        actor=actor,
+        critic=critic,
+        temperature=temperature,
+        batch=batch,
+        critic_use_cdq=critic_use_cdq,
+        actor_optimizer=actor_optimizer
+    )
+
+    new_temperature, temperature_info = update_temperature(
+        temperature=temperature,
+        entropy=actor_info['train/entropy'],
+        target_entropy=temp_target_entropy,
+        temp_optimizer=temp_optimizer
+    )
+
+    new_critic, critic_info = update_critic(
+        actor=new_actor,
+        critic=critic,
+        target_critic=target_critic,
+        temperature=new_temperature,
+        batch=batch,
+        gamma=gamma,
+        n_step=n_step,
+        critic_use_cdq=critic_use_cdq,
+        critic_optimizer=critic_optimizer
+    )
+
+    new_target_critic, target_critic_info = update_target_network(
+        network=new_critic,
+        target_network=target_critic,
+        target_tau=target_tau,
+    )
+
+    info = {
+        **actor_info,
+        **critic_info,
+        **target_critic_info,
+        **temperature_info,
+    }
+
+    return  new_actor, new_critic, new_target_critic, new_temperature, info

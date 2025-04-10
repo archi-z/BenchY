@@ -10,7 +10,7 @@ import torch
 
 from scale_rl.agents import create_agent
 from scale_rl.buffers import create_buffer
-from scale_rl.common import WandbTrainerLogger
+from scale_rl.common import WandbTrainerLogger, set_seed
 from scale_rl.envs import create_envs
 from scale_rl.evaluation import evaluate, record_video
 
@@ -37,8 +37,7 @@ def run(args):
         cfg.agent.device = \
             cfg.buffer.device = 'cuda' if torch.cuda.is_available() and cfg.device=='cuda' else 'cpu'
 
-    np.random.seed(cfg.seed)
-    random.seed(cfg.seed)
+    set_seed(cfg.seed)
 
     #############################
     # envs
@@ -77,10 +76,11 @@ def run(args):
     logger = WandbTrainerLogger(cfg)
 
     # initial evaluation
-    eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
-    logger.update_metric(**eval_info)
-    logger.log_metric(step=0)
-    logger.reset()
+    with torch.no_grad():
+        eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
+        logger.update_metric(**eval_info)
+        logger.log_metric(step=0)
+        logger.reset()
 
     # start training
     update_step = 0
@@ -136,22 +136,23 @@ def run(args):
                 update_counter -= 1
                 update_step += 1
 
-            # evaluation
-            if interaction_step % cfg.evaluation_per_interaction_step == 0:
-                eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
-                logger.update_metric(**eval_info)
+            with torch.no_grad():
+                # evaluation
+                if interaction_step % cfg.evaluation_per_interaction_step == 0:
+                    eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
+                    logger.update_metric(**eval_info)
 
-            # video recording
-            if interaction_step % cfg.recording_per_interaction_step == 0:
-                video_info = record_video(agent, eval_env, cfg.num_record_episodes)
-                logger.update_metric(**video_info)
+                # video recording
+                if interaction_step % cfg.recording_per_interaction_step == 0:
+                    video_info = record_video(agent, eval_env, cfg.num_record_episodes)
+                    logger.update_metric(**video_info)
 
-            # logging
-            if interaction_step % cfg.logging_per_interaction_step == 0:
-                # using env steps simplifies the comparison with the performance reported in the paper.
-                env_step = interaction_step * cfg.action_repeat * cfg.num_train_envs
-                logger.log_metric(step=env_step)
-                logger.reset()
+                # logging
+                if interaction_step % cfg.logging_per_interaction_step == 0:
+                    # using env steps simplifies the comparison with the performance reported in the paper.
+                    env_step = interaction_step * cfg.action_repeat * cfg.num_train_envs
+                    logger.log_metric(step=env_step)
+                    logger.reset()
 
     train_env.close()
     eval_env.close()
@@ -161,7 +162,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--config_path", type=str, default="./configs")
     parser.add_argument("--config_name", type=str, default="base")
-    parser.add_argument("--overrides", action="append", default=[])
+    parser.add_argument("--overrides", nargs="+", default=[])
     args = parser.parse_args()
 
     run(vars(args))

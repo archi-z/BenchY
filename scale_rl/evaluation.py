@@ -73,9 +73,9 @@ def evaluate(
             total_successes.append(successes[env_idx].astype("bool").astype("float"))
 
     eval_info = {
-        "avg_return": np.mean(total_returns),
-        "avg_length": np.mean(total_lengths),
-        "avg_success": np.mean(total_successes),
+        "eval/avg_return": np.mean(total_returns),
+        "eval/avg_length": np.mean(total_lengths),
+        "eval/avg_success": np.mean(total_successes),
     }
 
     return eval_info
