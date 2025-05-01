@@ -1,5 +1,6 @@
 import math
 
+import torch
 import torch.nn as nn
 
 # TODO delete
@@ -22,5 +23,11 @@ def orthogonal_init_(layer: nn.Module, gain=math.sqrt(2)):
 
 def he_normal_init_(layer: nn.Module):
     nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
+    if layer.bias is not None:
+        nn.init.zeros_(layer.bias)
+
+def xavier_init_(layer: nn.Module):
+    gain = nn.init.calculate_gain('relu')
+    nn.init.xavier_uniform_(layer.weight.data, gain)
     if layer.bias is not None:
         nn.init.zeros_(layer.bias)

@@ -11,7 +11,7 @@ env_name="dog-run"
 for seed in `seq 0 ${seed_max}`;
 do
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} \
-    python run_mrddpg.py \
+    python run_mr.py \
         --config_path ${config_path} \
         --config_name ${config_name} \
         --overrides \
