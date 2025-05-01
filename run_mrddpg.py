@@ -1,3 +1,4 @@
+import os
 import argparse
 
 import hydra
@@ -11,6 +12,15 @@ from scale_rl.buffers import create_buffer
 from scale_rl.common import WandbTrainerLogger, set_seed
 from scale_rl.envs import create_envs
 from scale_rl.evaluation import evaluate, record_video
+
+# Limit CPU usage
+cpu_num = 4
+os.environ['OMP_NUM_THREADS']=str(cpu_num)
+os.environ['MKL_NUM_THREADS']=str(cpu_num)
+os.environ['NUMEXPR_NUM_THREADS']=str(cpu_num)
+os.environ['OPENBLAS_NUM_THREADS']=str(cpu_num)
+os.environ['VECLIB_MAXIMUM_THREADS']=str(cpu_num)
+torch.set_num_threads(cpu_num)
 
 
 def run(args):

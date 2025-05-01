@@ -6,6 +6,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from scale_rl.buffers import Batch
 from scale_rl.agents.base_agent import BaseAgent
 from scale_rl.agents.sac.sac_network import (
     SACActor,
@@ -13,25 +14,26 @@ from scale_rl.agents.sac.sac_network import (
     SACClippedDoubleCritic,
     SACTemperature
 )
-from scale_rl.agents.sac.sac_update import update_sac_networks
+from scale_rl.agents.sac.sac_update import Update
 
 
 @dataclass(frozen=True)
 class SACConfig:
+    device: str
     seed: int
     num_train_envs: int
     max_episode_steps: int
     normalize_observation: bool
 
-    actor_block_type: str
     actor_num_blocks: int
     actor_hidden_dim: int
+    actor_activ: str
     actor_learning_rate: float
     actor_weight_decay: float
 
-    critic_block_type: str
     critic_num_blocks: int
     critic_hidden_dim: int
+    critic_activ: str
     critic_learning_rate: float
     critic_weight_decay: float
     critic_use_cdq: bool
@@ -47,47 +49,46 @@ class SACConfig:
     n_step: int
 
     mixed_precision: bool
-    device: str
 
 
 def _init_sac_networks(
     observation_dim: int,
     action_dim: int,
     cfg: SACConfig,
-    device: torch.device
+    device: torch.device,
+    dtype: torch.dtype
 ) -> Tuple[
         SACActor,
         Union[SACCritic, SACClippedDoubleCritic],
         Union[SACCritic, SACClippedDoubleCritic],
         SACTemperature
     ]:
-    compute_dtype = torch.float16 if cfg.mixed_precision else torch.float32
 
     actor = SACActor(
-            block_type=cfg.actor_block_type,
             num_blocks=cfg.actor_num_blocks,
             input_dim=observation_dim,
             hidden_dim=cfg.actor_hidden_dim,
             action_dim=action_dim,
-            dtype=compute_dtype
+            dtype=dtype,
+            activ=cfg.actor_activ
         ).to(device)
     
     if cfg.critic_use_cdq:
         critic = SACClippedDoubleCritic(
-            block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype
+            dtype=dtype,
+            activ=cfg.critic_activ
         ).to(device)
 
     else:
         critic = SACCritic(
-            block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype
+            dtype=dtype,
+            activ=cfg.critic_activ
         ).to(device)
 
     target_critic = copy.deepcopy(critic)
@@ -114,7 +115,8 @@ class SACAgent(BaseAgent):
         self._action_dim = action_space.shape[-1]
         cfg['temp_target_entropy'] = cfg['temp_target_entropy_coef'] * self._action_dim
         self._cfg = SACConfig(**cfg)
-        self._device = torch.device(self._cfg.device)
+        self.device = torch.device(self._cfg.device)
+        self.dtype = torch.float16 if self._cfg.mixed_precision else torch.float32
 
         self._init_network()
 
@@ -134,13 +136,24 @@ class SACAgent(BaseAgent):
             weight_decay=self._cfg.temp_weight_decay
         )
 
+        self.update_batch = Update(
+            actor=self._actor,
+            critic=self._critic,
+            temperature=self._temperature,
+            target_critic=self._target_critic,
+            actor_optimizer=self._actor_optimizer,
+            critic_optimizer=self._critic_optimizer,
+            temp_optimizer=self._temp_optimizer,
+            cfg=self._cfg
+        )
+
     def _init_network(self):
         (
             self._actor,
             self._critic,
             self._target_critic,
             self._temperature,
-        ) = _init_sac_networks(self._observation_dim, self._action_dim, self._cfg, self._device)
+        ) = _init_sac_networks(self._observation_dim, self._action_dim, self._cfg, self.device, self.dtype)
 
     def sample_actions(
         self,
@@ -155,7 +168,7 @@ class SACAgent(BaseAgent):
 
         with torch.no_grad():
             # current timestep observation is "next" observations from the previous timestep
-            observations = torch.as_tensor(prev_timestep["next_observation"]).to(self._device)
+            observations = torch.as_tensor(prev_timestep["next_observation"], device=self.device, dtype=self.dtype)
             dist = self._actor(observations, temperature)
             actions = dist.sample()
 
@@ -164,31 +177,21 @@ class SACAgent(BaseAgent):
     def update(
         self,
         update_step: int,
-        batch: Dict[str, np.ndarray]
+        batch: Batch
     ) -> Dict:
-        (
-            self._actor,
-            self._critic,
-            self._target_critic,
-            self._temperature,
-            update_info,
-        ) = update_sac_networks(
-            actor=self._actor,
-            critic=self._critic,
-            target_critic=self._target_critic,
-            temperature=self._temperature,
-            actor_optimizer=self._actor_optimizer,
-            critic_optimizer=self._critic_optimizer,
-            temp_optimizer=self._temp_optimizer,
-            batch=batch,
-            gamma=self._cfg.gamma,
-            n_step=self._cfg.n_step,
-            critic_use_cdq=self._cfg.critic_use_cdq,
-            target_tau=self._cfg.target_tau,
-            temp_target_entropy=self._cfg.temp_target_entropy
-        )
+        cur_obs = torch.as_tensor(batch["observation"], device=self.device, dtype=self.dtype)
+        actions = torch.as_tensor(batch["action"], device=self.device, dtype=self.dtype)
+        rewards = torch.as_tensor(batch["reward"], device=self.device, dtype=self.dtype)
+        terminated = torch.as_tensor(batch["terminated"], device=self.device, dtype=self.dtype)
+        next_obs = torch.as_tensor(batch["next_observation"], device=self.device, dtype=self.dtype)
 
-        for key, value in update_info.items():
-            update_info[key] = float(value)
+        update_info = self.update_batch.update_sac_networks(
+            update_step=update_step,
+            cur_obs=cur_obs,
+            actions=actions,
+            rewards=rewards,
+            terminated=terminated,
+            next_obs=next_obs
+        )
 
         return update_info

@@ -1,8 +1,7 @@
+import os
 import argparse
-import random
 
 import hydra
-import numpy as np
 import omegaconf
 import tqdm
 from dotmap import DotMap
@@ -13,6 +12,15 @@ from scale_rl.buffers import create_buffer
 from scale_rl.common import WandbTrainerLogger, set_seed
 from scale_rl.envs import create_envs
 from scale_rl.evaluation import evaluate, record_video
+
+# Limit CPU usage
+cpu_num = 4
+os.environ['OMP_NUM_THREADS']=str(cpu_num)
+os.environ['MKL_NUM_THREADS']=str(cpu_num)
+os.environ['NUMEXPR_NUM_THREADS']=str(cpu_num)
+os.environ['OPENBLAS_NUM_THREADS']=str(cpu_num)
+os.environ['VECLIB_MAXIMUM_THREADS']=str(cpu_num)
+torch.set_num_threads(cpu_num)
 
 
 def run(args):
@@ -34,8 +42,7 @@ def run(args):
     omegaconf.OmegaConf.register_new_resolver("eval", eval_resolver)
     omegaconf.OmegaConf.resolve(cfg)
     cfg.device = \
-        cfg.agent.device = \
-            cfg.buffer.device = 'cuda' if torch.cuda.is_available() and cfg.device=='cuda' else 'cpu'
+        cfg.agent.device = 'cuda' if torch.cuda.is_available() and cfg.device=='cuda' else 'cpu'
 
     set_seed(cfg.seed)
 
