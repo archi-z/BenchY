@@ -1,33 +1,29 @@
-import os
-import argparse
+import random
 
+import tqdm
 import hydra
 import omegaconf
-import tqdm
 from dotmap import DotMap
+import numpy as np
 import torch
 
-from scale_rl.agents import create_agent
-from scale_rl.buffers import create_buffer
-from scale_rl.common import WandbTrainerLogger, set_seed
-from scale_rl.envs import create_envs
 from scale_rl.evaluation import evaluate, record_video
 
-# Limit CPU usage
-cpu_num = 4
-os.environ['OMP_NUM_THREADS']=str(cpu_num)
-os.environ['MKL_NUM_THREADS']=str(cpu_num)
-os.environ['NUMEXPR_NUM_THREADS']=str(cpu_num)
-os.environ['OPENBLAS_NUM_THREADS']=str(cpu_num)
-os.environ['VECLIB_MAXIMUM_THREADS']=str(cpu_num)
-torch.set_num_threads(cpu_num)
+
+def set_seed(seed: int):
+    random.seed(seed)
+
+    np.random.seed(seed)
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-def run(args):
-    ###############################
-    # configs
-    ###############################
-
+def set_config(args):
     args = DotMap(args)
     config_path = args.config_path
     config_name = args.config_name
@@ -45,43 +41,108 @@ def run(args):
         cfg.agent.device = 'cuda' if torch.cuda.is_available() and cfg.device=='cuda' else 'cpu'
 
     set_seed(cfg.seed)
+    return cfg
 
-    #############################
-    # envs
-    #############################
-    train_env, eval_env = create_envs(**cfg.env)
 
-    observation_space = train_env.observation_space
-    action_space = train_env.action_space
+def train_off_policy(
+    cfg,
+    train_env,
+    eval_env,
+    agent,
+    buffer,
+    logger
+):
+    # initial evaluation
+    with torch.no_grad():
+        eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
+        logger.update_metric(**eval_info)
+        logger.log_metric(step=0)
+        logger.reset()
 
-    #############################
-    # buffer
-    #############################
-    buffer = create_buffer(
-        observation_space=observation_space, action_space=action_space, **cfg.buffer
-    )
-    buffer.reset()
+    # start training
+    update_step = 0
+    update_counter = 0
+    observations, env_infos = train_env.reset()
+    timestep = None
+    for interaction_step in tqdm.tqdm(
+        range(1, int(cfg.num_interaction_steps + 1)), smoothing=0.1
+    ):
+        # collect data
+        # While using random actions until buffer.can_sample(),
+        # we feed data into agent to compute statistics within a wrapper.
+        if timestep:
+            actions = agent.sample_actions(
+                interaction_step, prev_timestep=timestep, training=True
+            )
+            actions = actions.cpu().numpy()
+        if buffer.can_sample() is False:
+            actions = train_env.action_space.sample()
 
-    #############################
-    # agent
-    #############################
+        next_observations, rewards, terminateds, truncateds, env_infos = train_env.step(
+            actions
+        )
 
-    # Since the network architecture is typically tied to the learning algorithm,
-    #   we opted not to fully modularize the network for the sake of readability.
-    # Therefore, for each algorithm, the network is implemented within its respective directory.
+        next_buffer_observations = next_observations.copy()
+        for env_idx in range(cfg.num_train_envs):
+            if terminateds[env_idx] or truncateds[env_idx]:
+                next_buffer_observations[env_idx] = env_infos["final_observation"][
+                    env_idx
+                ]
 
-    agent = create_agent(
-        observation_space=observation_space,
-        action_space=action_space,
-        cfg=cfg.agent,
-    )
+        timestep = {
+            "observation": observations,
+            "action": actions,
+            "reward": rewards,
+            "terminated": terminateds,
+            "truncated": truncateds,
+            "next_observation": next_buffer_observations,
+        }
 
-    #############################
-    # train
-    #############################
+        buffer.add(timestep)
+        timestep["next_observation"] = next_observations
+        observations = next_observations
 
-    logger = WandbTrainerLogger(cfg)
+        if buffer.can_sample():
+            # update network
+            # updates_per_interaction_step can be below 1.0
+            update_counter += cfg.updates_per_interaction_step
+            while update_counter >= 1:
+                batch = buffer.sample()
+                update_info = agent.update(update_step, batch)
+                logger.update_metric(**update_info)
+                update_counter -= 1
+                update_step += 1
 
+            with torch.no_grad():
+                # evaluation
+                if interaction_step % cfg.evaluation_per_interaction_step == 0:
+                    eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
+                    logger.update_metric(**eval_info)
+
+                # video recording
+                if interaction_step % cfg.recording_per_interaction_step == 0:
+                    video_info = record_video(agent, eval_env, cfg.num_record_episodes)
+                    logger.update_metric(**video_info)
+
+                # logging
+                if interaction_step % cfg.logging_per_interaction_step == 0:
+                    # using env steps simplifies the comparison with the performance reported in the paper.
+                    env_step = interaction_step * cfg.action_repeat * cfg.num_train_envs
+                    logger.log_metric(step=env_step)
+                    logger.reset()
+
+    train_env.close()
+    eval_env.close()
+
+
+def train_off_policy_mr(
+    cfg,
+    train_env,
+    eval_env,
+    agent,
+    buffer,
+    logger
+):
     # initial evaluation
     with torch.no_grad():
         eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
@@ -170,13 +231,3 @@ def run(args):
 
     train_env.close()
     eval_env.close()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("--config_path", type=str, default="./configs")
-    parser.add_argument("--config_name", type=str, default="base")
-    parser.add_argument("--overrides", nargs="+", default=[])
-    args = parser.parse_args()
-
-    run(vars(args))

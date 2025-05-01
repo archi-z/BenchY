@@ -7,7 +7,7 @@ from scale_rl.agents import create_agent
 from scale_rl.buffers import create_buffer
 from scale_rl.common import WandbTrainerLogger
 from scale_rl.envs import create_envs
-from utils import set_config, train_off_policy
+from utils import set_config, train_off_policy_mr
 
 # Limit CPU usage
 cpu_num = 4
@@ -39,7 +39,7 @@ def run(args):
 
     logger = WandbTrainerLogger(cfg)
 
-    train_off_policy(
+    train_off_policy_mr(
         cfg=cfg,
         train_env=train_env,
         eval_env=eval_env,
