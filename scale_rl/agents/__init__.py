@@ -5,6 +5,7 @@ from scale_rl.agents.base_agent import BaseAgent
 from scale_rl.agents.random_agent import RandomAgent
 from scale_rl.agents.sac.sac_agent import SACAgent
 from scale_rl.agents.ddpg.ddpg_agent import DDPGAgent
+from scale_rl.agents.mrddpg.mrddpg_agent import MRDDPGAgent
 from scale_rl.agents.wrappers import ObservationNormalizer
 
 Config = TypeVar('Config')
@@ -27,6 +28,9 @@ def create_agent(
 
     elif agent_type == 'ddpg':
         agent = DDPGAgent(observation_space, action_space, cfg)
+
+    elif agent_type == 'mrddpg':
+        agent = MRDDPGAgent(observation_space, action_space, cfg)
 
     else:
         raise NotImplementedError
