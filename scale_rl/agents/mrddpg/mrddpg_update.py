@@ -45,7 +45,7 @@ class Update:
 
     def update_ac_networks(
         self,
-        update_step,
+        update_step: int,
         cur_obs: torch.Tensor,
         actions: torch.Tensor,
         rewards: torch.Tensor,

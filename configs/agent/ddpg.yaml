@@ -12,11 +12,13 @@ normalize_observation: true
 
 actor_num_blocks: 1
 actor_hidden_dim: 128
+actor_activ: 'ReLU'
 actor_learning_rate: 1e-4
 actor_weight_decay: 1e-2
 
 critic_num_blocks: 2
 critic_hidden_dim: 512
+critic_activ: 'ReLU'
 critic_learning_rate: 1e-4
 critic_weight_decay: 1e-2
 critic_use_cdq: ${env.episodic}

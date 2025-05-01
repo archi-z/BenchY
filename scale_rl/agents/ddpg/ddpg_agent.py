@@ -6,33 +6,35 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from scale_rl.buffers import Batch
 from scale_rl.agents.base_agent import BaseAgent
 from scale_rl.agents.ddpg.ddpg_network import (
     DDPGActor,
     DDPGCritic,
     DDPGClippedDoubleCritic
 )
-from scale_rl.agents.ddpg.ddpg_update import update_ddpg_networks
+from scale_rl.agents.ddpg.ddpg_update import Update
 from scale_rl.common.colored_noise import ColoredNoiseProcess
 from scale_rl.common.scheduler import linear_decay_scheduler
 
 
 @dataclass(frozen=True)
 class DDPGConfig:
+    device: str
     seed: int
     num_train_envs: int
     max_episode_steps: int
     normalize_observation: bool
 
-    actor_block_type: str
     actor_num_blocks: int
     actor_hidden_dim: int
+    actor_activ: str
     actor_learning_rate: float
     actor_weight_decay: float
 
-    critic_block_type: str
     critic_num_blocks: int
     critic_hidden_dim: int
+    critic_activ: str
     critic_learning_rate: float
     critic_weight_decay: float
     critic_use_cdq: bool
@@ -48,46 +50,45 @@ class DDPGConfig:
     exp_noise_std_final: float
 
     mixed_precision: bool
-    device: str
 
 
 def _init_ddpg_networks(
     observation_dim: int,
     action_dim: int,
     cfg: DDPGConfig,
-    device: torch.device
+    device: torch.device,
+    dtype: torch.dtype
 ) -> Tuple[
         DDPGActor,
         Union[DDPGCritic, DDPGClippedDoubleCritic],
         Union[DDPGCritic, DDPGClippedDoubleCritic],
     ]:
-    compute_dtype = torch.float16 if cfg.mixed_precision else torch.float32
 
     actor = DDPGActor(
-            block_type=cfg.actor_block_type,
             num_blocks=cfg.actor_num_blocks,
             input_dim=observation_dim,
             hidden_dim=cfg.actor_hidden_dim,
             action_dim=action_dim,
-            dtype=compute_dtype
+            dtype=dtype,
+            activ=cfg.actor_activ
         ).to(device)
     
     if cfg.critic_use_cdq:
         critic = DDPGClippedDoubleCritic(
-            block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype
+            dtype=dtype,
+            activ=cfg.critic_activ
         ).to(device)
 
     else:
         critic = DDPGCritic(
-            block_type=cfg.critic_block_type,
             num_blocks=cfg.critic_num_blocks,
             input_dim=observation_dim+action_dim,
             hidden_dim=cfg.critic_hidden_dim,
-            dtype=compute_dtype
+            dtype=dtype,
+            activ=cfg.critic_activ
         ).to(device)
 
     target_critic = copy.deepcopy(critic)
@@ -111,7 +112,8 @@ class DDPGAgent(BaseAgent):
         self._observation_dim = observation_space.shape[-1]
         self._action_dim = action_space.shape[-1]
         self._cfg = DDPGConfig(**cfg)
-        self._device = torch.device(self._cfg.device)
+        self.device = torch.device(self._cfg.device)
+        self.dtype = torch.float16 if self._cfg.mixed_precision else torch.float32
     
         self._init_network()
         self._init_exp_scheduler()
@@ -128,12 +130,21 @@ class DDPGAgent(BaseAgent):
             weight_decay=self._cfg.critic_weight_decay
         )
 
+        self.update_batch = Update(
+            actor=self._actor,
+            critic=self._critic,
+            target_critic=self._target_critic,
+            actor_optimizer=self._actor_optimizer,
+            critic_optimizer=self._critic_optimizer,
+            cfg=self._cfg
+        )
+
     def _init_network(self):
         (
             self._actor,
             self._critic,
             self._target_critic,
-        ) = _init_ddpg_networks(self._observation_dim, self._action_dim, self._cfg, self._device)
+        ) = _init_ddpg_networks(self._observation_dim, self._action_dim, self._cfg, self.device, self.dtype)
 
     def _init_exp_scheduler(self):
         if self._cfg.exp_noise_scheduler == "linear":
@@ -186,9 +197,9 @@ class DDPGAgent(BaseAgent):
 
         with torch.no_grad():
             # current timestep observation is "next" observations from the previous timestep
-            observations = torch.as_tensor(prev_timestep["next_observation"]).to(self._device)
+            observations = torch.as_tensor(prev_timestep["next_observation"], device=self.device, dtype=self.dtype)
             actions = self._actor(observations)
-            action_noise = torch.as_tensor(action_noise, device=self._device)
+            action_noise = torch.as_tensor(action_noise, device=self.device, dtype=self.dtype)
             actions = (actions+action_noise).clamp(-1.0, 1.0)
 
         return actions
@@ -196,28 +207,22 @@ class DDPGAgent(BaseAgent):
     def update(
         self,
         update_step: int,
-        batch: Dict[str, np.ndarray]
+        batch: Batch
     ) -> Dict:
-        (
-            self._actor,
-            self._critic,
-            self._target_critic,
-            update_info
-        ) = update_ddpg_networks(
-            actor=self._actor,
-            critic=self._critic,
-            target_critic=self._target_critic,
-            actor_optimizer=self._actor_optimizer,
-            critic_optimizer=self._critic_optimizer,
-            batch=batch,
-            gamma=self._cfg.gamma,
-            n_step=self._cfg.n_step,
-            target_tau=self._cfg.target_tau,
-            critic_use_cdq=self._cfg.critic_use_cdq,
+        cur_obs = torch.as_tensor(batch["observation"], device=self.device, dtype=self.dtype)
+        actions = torch.as_tensor(batch["action"], device=self.device, dtype=self.dtype)
+        rewards = torch.as_tensor(batch["reward"], device=self.device, dtype=self.dtype)
+        terminated = torch.as_tensor(batch["terminated"], device=self.device, dtype=self.dtype)
+        next_obs = torch.as_tensor(batch["next_observation"], device=self.device, dtype=self.dtype)
+
+        update_info = self.update_batch.update_ddpg_networks(
+            update_step=update_step,
+            cur_obs=cur_obs,
+            actions=actions,
+            rewards=rewards,
+            terminated=terminated,
+            next_obs=next_obs,
             noise_std=self._noise_std
         )
-
-        for key, value in update_info.items():
-            update_info[key] = float(value)
         
         return update_info
