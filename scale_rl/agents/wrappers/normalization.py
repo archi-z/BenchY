@@ -61,3 +61,8 @@ class ObservationNormalizer(AgentWrapper):
             update_step=update_step,
             batch=batch,
         )
+
+    def update_encoder(self, batch: Dict[str, np.ndarray]):
+        batch["observation"] = self._normalize(batch["observation"])
+        batch["next_observation"] = self._normalize(batch["next_observation"])
+        return self.agent.update_encoder(batch)

@@ -32,7 +32,7 @@ class TorchUniformBuffer(BaseBuffer):
         )
 
         self._current_idx = 0
-        self._device = device
+        self.device = device
 
     def __len__(self):
         return self._num_in_buffer
@@ -142,12 +142,12 @@ class TorchUniformBuffer(BaseBuffer):
 
         # copy the data for safeness
         batch = {}
-        batch["observation"] = torch.as_tensor(self._observations[sample_idxs], device=self._device)
-        batch["action"] = torch.as_tensor(self._actions[sample_idxs], device=self._device)
-        batch["reward"] = torch.as_tensor(self._rewards[sample_idxs], device=self._device)
-        batch["terminated"] = torch.as_tensor(self._terminateds[sample_idxs], device=self._device)
-        batch["truncated"] = torch.as_tensor(self._truncateds[sample_idxs], device=self._device)
-        batch["next_observation"] = torch.as_tensor(self._next_observations[sample_idxs], device=self._device)
+        batch["observation"] = torch.as_tensor(self._observations[sample_idxs], device=self.device)
+        batch["action"] = torch.as_tensor(self._actions[sample_idxs], device=self.device)
+        batch["reward"] = torch.as_tensor(self._rewards[sample_idxs], device=self.device)
+        batch["terminated"] = torch.as_tensor(self._terminateds[sample_idxs], device=self.device)
+        batch["truncated"] = torch.as_tensor(self._truncateds[sample_idxs], device=self.device)
+        batch["next_observation"] = torch.as_tensor(self._next_observations[sample_idxs], device=self.device)
 
         return batch
     

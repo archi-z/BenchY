@@ -16,7 +16,6 @@ def create_buffer(
     min_length: int,
     add_batch_size: int,
     sample_batch_size: int,
-    device: str,
     **kwargs,
 ) -> BaseBuffer:
 
@@ -47,7 +46,7 @@ def create_buffer(
                 min_length=min_length,
                 add_batch_size=add_batch_size, 
                 sample_batch_size=sample_batch_size,
-                device=torch.device(device)
+                device=torch.device(kwargs['device'])
             )
 
         else:
