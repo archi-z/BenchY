@@ -1,0 +1,54 @@
+##################################################################################
+# Model-based Representations for Soft Actor-Critic (MR-SAC)
+##################################################################################
+
+agent_type: 'mrsac'
+
+device: {device}
+seed: ${seed}
+num_train_envs: ${env.num_train_envs}
+max_episode_steps: ${env.max_episode_steps}
+normalize_observation: true
+
+zs_dim: 512
+za_dim: 256
+zsa_dim: 512
+encoder_num_blocks: 1
+encoder_hidden_dim: 512
+encoder_activ: 'ELU'
+encoder_learning_rate: 1e-4
+encoder_weight_decay: 1e-4
+
+actor_num_blocks: 1
+actor_hidden_dim: 128
+actor_activ: 'ReLU'
+actor_learning_rate: 1e-4
+actor_weight_decay: 1e-2
+
+critic_num_blocks: 2
+critic_hidden_dim: 512
+critic_activ: 'ELU'
+critic_learning_rate: 1e-4
+critic_weight_decay: 1e-2
+critic_use_cdq: true
+
+temp_target_entropy: null # entropy_coef * action_dim
+temp_target_entropy_coef: -0.5 
+temp_initial_value: 0.01
+temp_learning_rate: 1e-4
+temp_weight_decay: 0.0
+
+encoder_update_freq: 250
+target_tau: 0.005
+gamma: ${gamma}
+n_step: ${n_step}
+
+dyn_weight: 1
+reward_weight: 0.1
+done_weight: 0.1
+
+num_bins: 65
+lower: -10
+upper: 10
+
+mixed_precision: false
