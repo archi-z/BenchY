@@ -189,7 +189,7 @@ def train_off_policy_mr(
             "next_observation": next_buffer_observations,
         }
 
-        buffer.add(timestep)
+        buffer.add(timestep, horizon=cfg.agent.encoder_horizon)
         timestep["next_observation"] = next_observations
         observations = next_observations
 
@@ -202,7 +202,7 @@ def train_off_policy_mr(
                 if update_step % cfg.agent.encoder_update_freq == 0:
                     agent.update_target_encoder()
                     for _ in range(cfg.agent.encoder_update_freq):
-                        batch = buffer.sample()
+                        batch = buffer.sample_horizon(cfg.agent.encoder_horizon)
                         update_encodr_info = agent.update_encoder(batch)
                 
                 batch = buffer.sample()

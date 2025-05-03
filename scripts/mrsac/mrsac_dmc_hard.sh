@@ -1,9 +1,9 @@
 #!/bin/sh
-CUDA_VISIBLE_DEVICES=7
+CUDA_VISIBLE_DEVICES=1
 config_path="./configs"
 config_name="base"
 seed_max=4
-agent="mrddpg"
+agent="mrsac"
 env="dmc_hard"
 env_name="dog-run"
 

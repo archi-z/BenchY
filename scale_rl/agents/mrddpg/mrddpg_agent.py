@@ -30,6 +30,7 @@ class MRDDPGConfig:
     zs_dim: int
     za_dim: int
     zsa_dim: int
+    encoder_horizon: int
     encoder_num_blocks: int
     encoder_hidden_dim: int
     encoder_activ: str
