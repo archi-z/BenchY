@@ -1,4 +1,4 @@
-from collections import deque
+from typing import Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -31,6 +31,8 @@ class NpyUniformBuffer(BaseBuffer):
         )
 
         self._current_idx = 0
+        self._ep_timesteps = np.zeros(self._add_batch_size)
+        self._mask = np.zeros(self._max_length)
 
     def __len__(self):
         return self._num_in_buffer
@@ -61,94 +63,96 @@ class NpyUniformBuffer(BaseBuffer):
             (m,) + observation_shape, dtype=observation_dtype
         )
 
-        self._n_step_transitions = deque(maxlen=self._n_step)
         self._num_in_buffer = 0
 
-    def _get_n_step_prev_timestep(self) -> Batch:
-        """
-        This method processes a n_step_transitions to compute and update the
-            n-step return, the done status, and the next observation.
-        """
-        # pop n-step previous timestep
-        n_step_prev_timestep = self._n_step_transitions[0]
-        cur_timestep = self._n_step_transitions[-1]
+    def multi_step_reward(self, sample_idxs: int) -> Tuple[np.ndarray, np.ndarray]:
+        ind = (
+            sample_idxs.reshape(-1,1) + 
+            np.arange(self._n_step*self._add_batch_size, step=self._add_batch_size).reshape(1,-1)
+        ) % self._max_length
 
-        # copy (np.array(,) generates copy version of array) last timestep.
-        n_step_reward = np.array(cur_timestep["reward"])
-        n_step_terminated = np.array(cur_timestep["terminated"])
-        n_step_truncated = np.array(cur_timestep["truncated"])
-        n_step_next_observation = np.array(cur_timestep["next_observation"])
-
-        for n_step_idx in reversed(range(self._n_step - 1)):
-            transition = self._n_step_transitions[n_step_idx]
-            reward = transition["reward"]  # (n, )
-            terminated = transition["terminated"]  # (n, )
-            truncated = transition["truncated"]  # (n, )
-            next_observation = transition["next_observation"]  # (n, *obs_shape)
-
-            # compute n-step return
-            done = (terminated.astype(bool) | truncated.astype(bool)).astype(np.float32)
-            n_step_reward = reward + self._gamma * n_step_reward * (1 - done)
-
-            # assign next observation starting from done
-            done_mask = done.astype(bool)
-            n_step_terminated[done_mask] = terminated[done_mask]
-            n_step_truncated[done_mask] = truncated[done_mask]
-            n_step_next_observation[done_mask] = next_observation[done_mask]
-
-        n_step_prev_timestep["reward"] = n_step_reward
-        n_step_prev_timestep["terminated"] = n_step_terminated
-        n_step_prev_timestep["truncated"] = n_step_truncated
-        n_step_prev_timestep["next_observation"] = n_step_next_observation
-
-        return n_step_prev_timestep
-
-    def add(self, timestep: Batch) -> None:
-        # temporarily hold current timestep to the buffer
-        self._n_step_transitions.append(
-            {key: np.array(value) for key, value in timestep.items()}
+        rewards = self._rewards[ind]
+        terminateds = self._terminateds[ind]
+        truncateds = self._truncateds[ind]
+        
+        return (
+            (rewards * (1-terminateds) * self._gammas).sum(1),
+            1-(1-terminateds).prod(1),
+            1-(1-truncateds).prod(1)
         )
 
-        if len(self._n_step_transitions) >= self._n_step:
-            n_step_prev_timestep = self._get_n_step_prev_timestep()
+    def add(self, timestep: Batch, horizon=1) -> None:
+        # add samples to the buffer
+        add_idxs = np.arange(self._add_batch_size) + self._current_idx
+        add_idxs = add_idxs % self._max_length
 
-            # add samples to the buffer
-            add_idxs = np.arange(self._add_batch_size) + self._current_idx
-            add_idxs = add_idxs % self._max_length
+        self._observations[add_idxs] = timestep["observation"]
+        self._actions[add_idxs] = timestep["action"]
+        self._rewards[add_idxs] = timestep["reward"]
+        self._terminateds[add_idxs] = timestep["terminated"]
+        self._truncateds[add_idxs] = timestep["truncated"]
+        self._next_observations[add_idxs] = timestep["next_observation"]
 
-            self._observations[add_idxs] = n_step_prev_timestep["observation"]
-            self._actions[add_idxs] = n_step_prev_timestep["action"]
-            self._rewards[add_idxs] = n_step_prev_timestep["reward"]
-            self._terminateds[add_idxs] = n_step_prev_timestep["terminated"]
-            self._truncateds[add_idxs] = n_step_prev_timestep["truncated"]
-            self._next_observations[add_idxs] = n_step_prev_timestep["next_observation"]
+        self._ep_timesteps += 1
 
-            self._num_in_buffer = min(
-                self._num_in_buffer + self._add_batch_size, self._max_length
-            )
-            self._current_idx = (
-                self._current_idx + self._add_batch_size
+        self._num_in_buffer = min(
+            self._num_in_buffer + self._add_batch_size, self._max_length
+        )
+        self._current_idx = (
+            self._current_idx + self._add_batch_size
+        ) % self._max_length
+
+        if max(horizon, self._n_step) > 1:
+            mask_idxs = (
+                add_idxs[self._ep_timesteps >= max(horizon, self._n_step)]
+                +1
+                -max(horizon, self._n_step)
             ) % self._max_length
+            self._mask[mask_idxs] = 1
+            self._mask[add_idxs] = 0
+            self._ep_timesteps[(timestep["terminated"]+timestep["truncated"])>0] = 0
+        else:
+            self._mask[add_idxs] = 1
 
     def can_sample(self) -> bool:
         if self._num_in_buffer < self._min_length:
             return False
         else:
             return True
+        
+    def sample_ind(self):
+        nz = np.nonzero(self._mask)[0].reshape(-1)
+        sampled_ind = np.random.randint(nz.shape[0], size=self._sample_batch_size)
+        sampled_ind = nz[sampled_ind]
+        return sampled_ind
 
     def sample(self) -> Batch:
-        sample_idxs = np.random.randint(
-            0, self._num_in_buffer, size=self._sample_batch_size
-        )
+        sample_idxs = self.sample_ind()
 
         # copy the data for safeness
         batch = {}
-        batch["observation"] = np.array(self._observations[sample_idxs])
-        batch["action"] = np.array(self._actions[sample_idxs])
-        batch["reward"] = np.array(self._rewards[sample_idxs])
-        batch["terminated"] = np.array(self._terminateds[sample_idxs])
-        batch["truncated"] = np.array(self._truncateds[sample_idxs])
-        batch["next_observation"] = np.array(self._next_observations[sample_idxs])
+        batch["observation"] = self._observations[sample_idxs]
+        batch["action"] = self._actions[sample_idxs]
+        batch["reward"], batch["terminated"], batch["truncated"] = self.multi_step_reward(sample_idxs)
+        batch["next_observation"] = self._next_observations[sample_idxs]
+
+        return batch
+    
+    def sample_horizon(self, horizon: int) -> Batch:
+        sample_idxs = self.sample_ind()
+        sample_idxs = (
+            sample_idxs.reshape(-1,1) + 
+            np.arange(horizon*self._add_batch_size, step=self._add_batch_size).reshape(1,-1)
+        ) % self._max_length
+
+        # copy the data for safeness
+        batch = {}
+        batch["observation"] = self._observations[sample_idxs]
+        batch["action"] = self._actions[sample_idxs]
+        batch["reward"] = self._rewards[sample_idxs]
+        batch["terminated"] = self._terminateds[sample_idxs]
+        batch["truncated"] = self._truncateds[sample_idxs]
+        batch["next_observation"] = self._next_observations[sample_idxs]
 
         return batch
 

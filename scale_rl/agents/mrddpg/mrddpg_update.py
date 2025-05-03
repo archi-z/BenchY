@@ -10,7 +10,7 @@ from scale_rl.agents.mrddpg.mrddpg_network import (
     MRDDPGCritic,
     MRDDPGClippedDoubleCritic
 )
-from scale_rl.networks.loss import TwoHot
+from scale_rl.networks.loss import TwoHot, masked_mse
 
 
 class Update:
@@ -94,14 +94,19 @@ class Update:
         with torch.no_grad():
             next_zs = self._target_encoder.zs(next_obs)
 
-        zs = self._encoder.zs(cur_obs)
-        za = self._encoder.za(actions)
-        pred_d, pred_zs, pred_r = self._encoder.model_all(zs, za)
+        zs = self._encoder.zs(cur_obs[:, 0])
+        prev_not_done = 1
+        encoder_loss = 0
 
-        dyn_loss = F.mse_loss(pred_zs, next_zs)
-        reward_loss = self._two_hot.cross_entropy_loss(pred_r, rewards.reshape(-1, 1)).mean()
-        done_loss = F.mse_loss(pred_d, terminated.reshape(-1, 1))
-        encoder_loss = self._cfg.dyn_weight * dyn_loss + self._cfg.reward_weight * reward_loss + self._cfg.done_weight * done_loss
+        for i in range(self._cfg.encoder_horizon):
+            za = self._encoder.za(actions[:, i])
+            pred_d, pred_zs, pred_r = self._encoder.model_all(zs, za)
+
+            dyn_loss = masked_mse(pred_zs, next_zs[:, i], prev_not_done)
+            reward_loss = (self._two_hot.cross_entropy_loss(pred_r, rewards[:, i].reshape(-1, 1)) * prev_not_done).mean()
+            done_loss = masked_mse(pred_d, terminated[:, i].reshape(-1, 1), prev_not_done)
+            encoder_loss += self._cfg.dyn_weight * dyn_loss + self._cfg.reward_weight * reward_loss + self._cfg.done_weight * done_loss
+            prev_not_done = (1 - terminated[:,i].reshape(-1,1)) * prev_not_done
 
         self._encoder_optimizer.zero_grad()
         encoder_loss.backward()

@@ -29,3 +29,6 @@ class TwoHot:
         pred = F.log_softmax(pred, dim=-1)
         target = self.transform(target)
         return -(target * pred).sum(-1, keepdim=True)
+    
+def masked_mse(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor):
+    return (F.mse_loss(x, y, reduction='none') * mask).mean()

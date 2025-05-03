@@ -40,6 +40,7 @@ class BaseBuffer(ABC):
         self._gamma = gamma
         self._add_batch_size = add_batch_size
         self._sample_batch_size = sample_batch_size
+        self._gammas = np.power(self._gamma, np.arange(self._n_step))
 
     def __len__(self):
         pass

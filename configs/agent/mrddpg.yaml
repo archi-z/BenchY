@@ -13,6 +13,7 @@ normalize_observation: true
 zs_dim: 512
 za_dim: 256
 zsa_dim: 512
+encoder_horizon: 5
 encoder_num_blocks: 1
 encoder_hidden_dim: 512
 encoder_activ: 'ELU'
