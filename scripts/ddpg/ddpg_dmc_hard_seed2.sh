@@ -1,19 +1,17 @@
 #!/bin/sh
-CUDA_VISIBLE_DEVICES=7
+CUDA_VISIBLE_DEVICES=6
 env_name="dog-run humanoid-run"
 seed=2
 n_step=1
-encoder_horizon=5
 
 for en in ${env_name};
 do
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} \
-    python run_mr.py \
+    python run.py \
         --overrides \
-            agent="mrddpg" \
+            agent="ddpg" \
             env="dmc_hard" \
             env.env_name=${en} \
             seed=${seed} \
-            n_step=${n_step} \
-            agent.encoder_horizon=${encoder_horizon}
+            n_step=${n_step}
 done
