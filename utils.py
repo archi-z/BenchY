@@ -114,6 +114,12 @@ def train_off_policy(
                 update_step += 1
 
             with torch.no_grad():
+                # log metrics
+                if interaction_step % cfg.metric_per_interaction_step == 0:
+                    log_metrics_batch = buffer.sample()
+                    metrics_info = agent.get_metrics(update_step, log_metrics_batch)
+                    logger.update_metric(**metrics_info)
+
                 # evaluation
                 if interaction_step % cfg.evaluation_per_interaction_step == 0:
                     eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)
@@ -194,24 +200,30 @@ def train_off_policy_mr(
         observations = next_observations
 
         if buffer.can_sample():
+            if update_step % cfg.agent.encoder_update_freq == 0:
+                agent.update_target_encoder()
+                for _ in range(cfg.agent.encoder_update_freq):
+                    batch = buffer.sample_horizon(cfg.agent.encoder_horizon)
+                    update_encodr_info = agent.update_encoder(batch)
+                logger.update_metric(**update_encodr_info)
+                
             # update network
             # updates_per_interaction_step can be below 1.0
             update_counter += cfg.updates_per_interaction_step
             while update_counter >= 1:
-                update_encodr_info={}
-                if update_step % cfg.agent.encoder_update_freq == 0:
-                    agent.update_target_encoder()
-                    for _ in range(cfg.agent.encoder_update_freq):
-                        batch = buffer.sample_horizon(cfg.agent.encoder_horizon)
-                        update_encodr_info = agent.update_encoder(batch)
-                
                 batch = buffer.sample()
                 update_info = agent.update(update_step, batch)
-                logger.update_metric(**update_info, **update_encodr_info)
+                logger.update_metric(**update_info)
                 update_counter -= 1
                 update_step += 1
 
             with torch.no_grad():
+                # log metrics
+                if interaction_step % cfg.metric_per_interaction_step == 0:
+                    log_metrics_batch = buffer.sample()
+                    metrics_info = agent.get_metrics(update_step, log_metrics_batch)
+                    logger.update_metric(**metrics_info)
+                    
                 # evaluation
                 if interaction_step % cfg.evaluation_per_interaction_step == 0:
                     eval_info = evaluate(agent, eval_env, cfg.num_eval_episodes)

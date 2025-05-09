@@ -36,8 +36,14 @@ def run(args):
         action_space=action_space,
         cfg=cfg.agent,
     )
-
-    logger = WandbTrainerLogger(cfg)
+    
+    total_num_params, actor_num_params, critic_num_params= agent.count_parameters()
+    nun_params = {
+        'total_num_params': total_num_params,
+        'actor_num_params': actor_num_params,
+        'critic_num_params': critic_num_params
+    }
+    logger = WandbTrainerLogger(cfg, nun_params)
 
     train_off_policy_mr(
         cfg=cfg,

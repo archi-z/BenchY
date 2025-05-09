@@ -1,245 +1,223 @@
-import re
-from typing import Any, Callable, Dict, List, Sequence, Union
+from typing import Dict, Tuple
 
-import flax
-import jax
-import jax.numpy as jnp
-import numpy as np
-from flax.core.frozen_dict import FrozenDict
-
-from scale_rl.networks.trainer import PRNGKey, Trainer
-
-# Additional typings
-Params = flax.core.FrozenDict[str, Any]
-Array = Union[np.ndarray, jnp.ndarray]
-Data = Union[Array, Dict[str, "Data"]]
-Batch = Dict[str, Data]
+import torch
+import torch.nn as nn
 
 
-def sum_all_values_in_pytree(pytree) -> float:
-    # Flatten the pytree to get all leaves (individual values)
-    leaves = jax.tree_util.tree_leaves(pytree)
+class Intermediates():
+    def __init__(self, net: nn.Module):
+        self.net = net
+        self.features = {}
+        self.hooks = []
 
-    # Sum all leaves
-    total_sum = sum(jnp.sum(leaf) for leaf in leaves)
+    def register_hook(self):
+        for name, module in self.net.named_modules():
+            if name == '' or len(list(module.children())) > 0:
+                continue
+            self.hooks.append(module.register_forward_hook(self._hook_fn(name)))
 
-    return total_sum
+    def _hook_fn(self, layer_name):
+        def hook(module: nn.Module, input: torch.Tensor, output: torch.Tensor):
+            self.features[layer_name] = output.detach()
+        
+        return hook
 
-
-# rephrase each key
-def flatten_dict(d, parent_key="", sep="_"):
-    items = {}
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict) or isinstance(v, FrozenDict):
-            items.update(flatten_dict(v, new_key, sep=sep))
-        else:
-            items[new_key] = v
-    return items
-
-
-def add_prefix_to_dict(d: dict, prefix: str = None, sep="/") -> dict:
-    new_dict = {}
-    for key, value in d.items():
-        new_dict[prefix + sep + key] = value
-    return new_dict
-
-
-def get_weight_norm(
-    param_dict: Params,
-    prefix: str,
-) -> dict:
-    """
-    param_dict is a frozen dictionary which contains the gradients/values of each individual parameter
-
-    Return:
-        param gradient/value norm dictionary
-        (Caution : norm values for vmapped functions (multi-head Q-networks) are summed to a single value)
-    """
-    param_norm_dict = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), param_dict)
-
-    updated_params = add_all_key(param_norm_dict)
-    squared_param_norm_dict = jax.tree_util.tree_map(
-        lambda x: jnp.square(x), param_norm_dict
-    )
-    updated_params["total"] = jnp.sqrt(
-        sum_all_values_in_pytree(squared_param_norm_dict)
-    )
-
-    return add_prefix_to_dict(
-        flatten_dict(updated_params), prefix + "/weightnorm", sep="_"
-    )
-
-
-def add_all_key(d):
-    new_dict = {}
-    for key, value in d.items():
-        if isinstance(value, dict) or isinstance(value, FrozenDict):
-            new_dict[key] = add_all_key(value)
-            if "kernel" in new_dict[key] and "bias" in new_dict[key]:
-                kernel_norm = jnp.square(new_dict[key]["kernel"])
-                bias_norm = jnp.square(new_dict[key]["bias"])
-                new_dict[key] = jnp.sqrt(kernel_norm + bias_norm)
-        else:
-            new_dict[key] = jnp.linalg.norm(value)
-    return new_dict
+    def remove(self):
+        for hook in self.hooks:
+            hook.remove()
 
 
 def get_dormant_ratio(
-    activations: Dict[str, List[jnp.ndarray]], prefix: str, tau: float = 0.1
-) -> jnp.ndarray:
-    """
-    Compute the dormant mask for a given set of activations.
-
-    Args:
-        activations: A dictionary of activations.
-        prefix: A string prefix for naming.
-        tau: The threshold for determining dormancy.
-
-    Returns:
-        A dictionary of dormancy ratios for each layer and the total.
-
-    Source : https://github.com/timoklein/redo/blob/dcaeff1c6afd0f1615a21da5beda870487b2ed15/src/redo.py#L215
-    """
-    key = "dormant" if tau > 0.0 else "zeroactiv"
+    features: Dict[str, torch.Tensor],
+    tau: float
+) -> Dict[str, float]:
     ratios = {}
-    total_activs = []
+    masks = []
 
-    for sub_layer_name, activs in list(activations.items()):
-        layer_name = f"{prefix}_{sub_layer_name}"
-
+    for layer_name, activs in features.items():
         # For double critics, lets just stack them into one batch
-        if len(activs.shape) > 2:
+        if activs.dim() > 2:
             activs = activs.reshape(-1, activs.shape[-1])
 
-        # Taking the mean here conforms to the expectation under D in the main paper's formula
-        score = jnp.abs(activs).mean(axis=0)
-        # Divide by activation mean to make the threshold independent of the layer size
-        # see https://github.com/google/dopamine/blob/ce36aab6528b26a699f5f1cefd330fdaf23a5d72/dopamine/labs/redo/weight_recyclers.py#L314
-        # https://github.com/google/dopamine/issues/209
+        score = activs.abs().mean(dim=0)
         normalized_score = score / (score.mean() + 1e-9)
 
         if tau > 0.0:
-            layer_mask = jnp.where(normalized_score <= tau, 1, 0)
+            dormant_mask = (normalized_score <= tau)
         else:
-            layer_mask = jnp.where(
-                jnp.isclose(normalized_score, jnp.zeros_like(normalized_score)), 1, 0
-            )
+            dormant_mask = torch.isclose(normalized_score, torch.zeros_like(normalized_score))
 
-        ratios[f"{prefix}/{key}_{layer_name}"] = (
-            jnp.sum(layer_mask) / layer_mask.size
-        ) * 100
-        total_activs.append(layer_mask)
+        percent = dormant_mask.sum().item() / dormant_mask.numel() * 100.0
+        ratios[f"{layer_name}"] = percent
+        masks.append(dormant_mask)
 
     # aggregated mask of entire network
-    total_mask = jnp.concatenate(total_activs)
-
-    ratios[f"{prefix}/{key}_total"] = (jnp.sum(total_mask) / total_mask.size) * 100
+    all_masks = torch.cat(masks)
+    total_percent = all_masks.sum().item() / all_masks.numel() * 100.0
+    ratios['total'] = total_percent
 
     return ratios
 
 
 def get_feature_norm(
-    activations: Dict[str, List[jnp.ndarray]], prefix: str
-) -> jnp.ndarray:
-    """
-    Computes the feature norm for a given set of activations.
-    """
+    features: Dict[str, torch.Tensor]
+) -> Dict[str, float]:
     norms = {}
     total_norm = 0.0
-    for sub_layer_name, activs in list(activations.items()):
-        layer_name = f"{prefix}_{sub_layer_name}"
-
+    for layer_name, activs in features.items():
         # For double critics, lets just stack them into one batch
-        if len(activs.shape) > 2:
+        if activs.dim() > 2:
             activs = activs.reshape(-1, activs.shape[-1])
 
         # Compute the L2 norm for all examples in the batch at once
-        batch_norms = jnp.linalg.norm(activs, ord=2, axis=-1)
+        batch_norms = torch.linalg.norm(activs, ord=2, axis=-1)
 
         # Compute the expected (mean) L2 norm across the batch
-        expected_norm = jnp.mean(batch_norms)
+        expected_norm = batch_norms.mean().item()
 
-        norms[f"{prefix}/featnorm_{layer_name}"] = expected_norm
+        norms[f"{layer_name}"] = expected_norm
         total_norm += expected_norm
 
-    norms[f"{prefix}/featnorm_total"] = total_norm
+    norms['total'] = total_norm
 
     return norms
 
 
-# source : https://arxiv.org/pdf/2112.04716
-def get_critic_featdot(
-    rng: PRNGKey, actor: Trainer, critic: Trainer, batch: Batch, sample: bool = True
-):
-    new_rng, cur_sample_key, next_sample_key = jax.random.split(rng, 3)
-
-    if sample:
-        dist, _ = actor(observations=batch["observation"])
-        cur_actions = dist.sample(seed=cur_sample_key)
-
-        next_dist, _ = actor(observations=batch["next_observation"])
-        next_actions = next_dist.sample(seed=next_sample_key)
-    else:
-        cur_actions, _ = actor(observations=batch["observation"])
-        next_actions, _ = actor(observations=batch["next_observation"])
-
-    _, cur_critic_info = critic(observations=batch["observation"], actions=cur_actions)
-
-    final_cur_critic_feat = cur_critic_info[get_last_layer(cur_critic_info)]
-    if len(final_cur_critic_feat.shape) > 2:
-        final_cur_critic_feat = final_cur_critic_feat.reshape(
-            -1, final_cur_critic_feat.shape[-1]
-        )
-
-    _, next_critic_info = critic(
-        observations=batch["next_observation"], actions=next_actions
-    )
-
-    final_next_critic_feat = next_critic_info[get_last_layer(next_critic_info)]
-    if len(final_next_critic_feat.shape) > 2:
-        final_next_critic_feat = final_next_critic_feat.reshape(
-            -1, final_next_critic_feat.shape[-1]
-        )
-
-    # Compute mean dot product of the batch
-    # Don't do cosine similarity, it has to be dot product according to the paper
-    result = jnp.mean(
-        jnp.sum(final_cur_critic_feat * final_next_critic_feat, axis=1), axis=0
-    )
-
-    return new_rng, {"critic/DR3_featdot": result}
-
-
-def get_last_layer(layer_dict):
-    def extract_number(key):
-        match = re.search(r"\d+$", key)
-        return int(match.group()) if match else -1
-
-    # Sort keys based on the numeric suffix
-    sorted_keys = sorted(layer_dict.keys(), key=extract_number, reverse=True)
-
-    # Return the first key (which will be the one with the highest number)
-    return sorted_keys[0] if sorted_keys else None
-
-
-def print_num_parameters(
-    pytree_dict_list: Sequence[FrozenDict], network_type: str
+def get_srank(
+    matrix: torch.Tensor,
+    thershold=0.01
 ) -> int:
-    """
-    Return number of trainable parameters
-    """
-    total_params = 0
+    if matrix.dim() > 2:
+        matrix = matrix.reshape(-1, matrix.shape[-1])
 
-    for pytree_dict in pytree_dict_list:
-        leaf_nodes = jax.tree_util.tree_leaves(pytree_dict)
-        for leaf in leaf_nodes:
-            total_params += np.prod(leaf.shape)
+    singular_vals = torch.linalg.svdvals(matrix)
+    total = singular_vals.sum().item()
+    target = total * (1.0 - thershold)
 
-    # Format the total_params to a human-readable string
-    if total_params >= 1e6:
-        return print(f"{network_type} total params: {total_params / 1e6:.2f}M")
-    elif total_params >= 1e3:
-        return print(f"{network_type} total params: {total_params / 1e3:.2f}K")
+    acc = 0.0
+    k = 0
+    for sv in singular_vals:
+        acc += sv.item()
+        k += 1
+        if acc >= target:
+            break
+    return k
+
+
+def get_critic_featdot(
+    actor: nn.Module,
+    critic: nn.Module,
+    next_obs: torch.Tensor,
+    current_critic_feat: torch.Tensor,
+    intermediates: Intermediates,
+    deterministic_policy=True
+) -> float:
+    if deterministic_policy:
+        next_actions = actor(next_obs)
+        
     else:
-        return print(f"{network_type} total params: {total_params}")
+        dist = actor(next_obs, temperature=1.0)
+        next_actions = dist.sample()
+        
+    critic(next_obs, next_actions)
+
+    next_critic_feat = intermediates.features['encoder.layer_norm']
+    
+    result = (next_critic_feat * current_critic_feat).sum(dim=1).mean(dim=0).item()
+
+    return result
+
+
+def get_critic_featdot_double(
+    actor: nn.Module,
+    critic: nn.Module,
+    next_obs: torch.Tensor,
+    current_critic_feat: Tuple[torch.Tensor, torch.Tensor],
+    intermediates: Intermediates,
+    deterministic_policy=True
+):
+    if deterministic_policy:
+        next_actions = actor(next_obs)
+
+    else:
+        dist = actor(next_obs, temperature=1.0)
+        next_actions = dist.sample()
+        
+    critic(next_obs, next_actions)
+
+    q1_next_critic_feat = intermediates.features['critics.0.encoder.layer_norm']
+    q2_next_critic_feat = intermediates.features['critics.1.encoder.layer_norm']
+
+    result1 = (q1_next_critic_feat * current_critic_feat[0]).sum(dim=1).mean(dim=0).item()
+    result2 = (q2_next_critic_feat * current_critic_feat[1]).sum(dim=1).mean(dim=0).item()
+
+    return result1, result2
+
+
+def get_mr_critic_featdot(
+    encoder: nn.Module,
+    actor: nn.Module,
+    critic: nn.Module,
+    next_zs: torch.Tensor,
+    current_critic_feat: torch.Tensor,
+    intermediates: Intermediates,
+    deterministic_policy=True
+) -> float:
+    if deterministic_policy:
+        next_actions = actor(next_zs)
+        
+    else:
+        dist = actor(next_zs, temperature=1.0)
+        next_actions = dist.sample()
+
+    next_za = encoder.za(next_actions)
+    next_zsa = encoder(next_zs, next_za)
+    critic(next_zsa)
+
+    next_critic_feat = intermediates.features['encoder.layer_norm']
+    
+    result = (next_critic_feat * current_critic_feat).sum(dim=1).mean(dim=0).item()
+
+    return result
+
+
+def get_mr_critic_featdot_double(
+    encoder: nn.Module,
+    actor: nn.Module,
+    critic: nn.Module,
+    next_zs: torch.Tensor,
+    current_critic_feat: Tuple[torch.Tensor, torch.Tensor],
+    intermediates: Intermediates,
+    deterministic_policy=True
+):
+    if deterministic_policy:
+        next_actions = actor(next_zs)
+
+    else:
+        dist = actor(next_zs, temperature=1.0)
+        next_actions = dist.sample()
+
+    next_za = encoder.za(next_actions)
+    next_zsa = encoder(next_zs, next_za)
+    critic(next_zsa)
+
+    q1_next_critic_feat = intermediates.features['critics.0.encoder.layer_norm']
+    q2_next_critic_feat = intermediates.features['critics.1.encoder.layer_norm']
+
+    result1 = (q1_next_critic_feat * current_critic_feat[0]).sum(dim=1).mean(dim=0).item()
+    result2 = (q2_next_critic_feat * current_critic_feat[1]).sum(dim=1).mean(dim=0).item()
+
+    return result1, result2
+
+
+def count_parameters(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters())
+    
+
+def format_params_str(num_params):
+    if num_params >= 1e6:
+        return f"{num_params / 1e6:.2f}M"
+    elif num_params >= 1e3:
+        return f"{num_params / 1e3:.2f}K"
+    else:
+        return f"{num_params}"

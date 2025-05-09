@@ -1,6 +1,7 @@
 from typing import Dict
 
 import numpy as np
+import torch
 
 from scale_rl.agents.base_agent import AgentWrapper, BaseAgent
 from scale_rl.agents.wrappers.utils import RunningMeanStd
@@ -38,7 +39,7 @@ class ObservationNormalizer(AgentWrapper):
         interaction_step: int,
         prev_timestep: Dict[str, np.ndarray],
         training: bool,
-    ) -> np.ndarray:
+    ) -> torch.Tensor:
         """
         Defines the sample action function with normalized observation.
         """
@@ -66,3 +67,11 @@ class ObservationNormalizer(AgentWrapper):
         batch["observation"] = self._normalize(batch["observation"])
         batch["next_observation"] = self._normalize(batch["next_observation"])
         return self.agent.update_encoder(batch)
+
+    def get_metrics(self, update_step: int, batch: Dict[str, np.ndarray]):
+        batch["observation"] = self._normalize(batch["observation"])
+        batch["next_observation"] = self._normalize(batch["next_observation"])
+        return self.agent.get_metrics(
+            update_step=update_step,
+            batch=batch,
+        )  
