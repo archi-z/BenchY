@@ -1,5 +1,5 @@
 #!/bin/sh
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=7
 env_name="humanoid-run"
 seed=4
 n_step=1

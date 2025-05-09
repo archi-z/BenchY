@@ -1,5 +1,5 @@
 #!/bin/sh
-CUDA_VISIBLE_DEVICES=7
+CUDA_VISIBLE_DEVICES=6
 seed_max=4
 agent="ddpg"
 env="dmc_hard"
