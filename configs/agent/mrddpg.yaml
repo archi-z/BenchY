@@ -28,10 +28,10 @@ actor_weight_decay: 1e-4
 
 critic_num_blocks: 2
 critic_hidden_dim: 512
-critic_activ: 'ELU'
+critic_activ: 'ReLU'
 critic_learning_rate: 1e-4
 critic_weight_decay: 1e-2
-critic_use_cdq: true
+critic_use_cdq: ${env.episodic}
 
 encoder_update_freq: 250
 target_tau: 0.005

@@ -90,10 +90,10 @@ class Update:
         self._actor_optimizer.step()
 
         info = {
-            'train/actor_loss': actor_loss.item(),
-            'train/actor_action': actions.abs().mean().item(),
-            'train/actor_pnorm': actor_pnorm,
-            'train/actor_gnorm': actor_gnorm
+            'train_actor/loss': actor_loss.item(),
+            'train_actor/action': actions.abs().mean().item(),
+            'train_actor/pnorm': actor_pnorm,
+            'train_actor/gnorm': actor_gnorm
         }
 
         return info
@@ -140,12 +140,12 @@ class Update:
         self._critic_optimizer.step()
 
         info = {
-            'train/critic_loss': critic_loss.item(),
-            'train/q1_mean': pred_q1.mean().item(),
-            'train/q2_mean': pred_q2.mean().item(),
+            'train_critic/loss': critic_loss.item(),
+            'train_critic/q1_mean': pred_q1.mean().item(),
+            'train_critic/q2_mean': pred_q2.mean().item(),
             'train/rew_mean': rewards.mean().item(),
-            'train/critic_pnorm': critic_pnorm,
-            'train/critic_gnorm': critic_gnorm,
+            'train_critic/pnorm': critic_pnorm,
+            'train_critic/gnorm': critic_gnorm,
         }
 
         return info

@@ -15,6 +15,8 @@ from scale_rl.agents.sac.sac_network import (
     SACTemperature
 )
 from scale_rl.agents.sac.sac_update import Update
+from scale_rl.agents.sac.sac_metric import get_actor_metrics, get_critic_metrics
+from scale_rl.networks.metrics import count_parameters, format_params_str
 
 
 @dataclass(frozen=True)
@@ -160,7 +162,7 @@ class SACAgent(BaseAgent):
         interaction_step: int,
         prev_timestep: Dict[str, np.ndarray],
         training: bool,
-    ) -> np.ndarray:
+    ) -> torch.Tensor:
         if training:
             temperature = 1.0
         else:
@@ -178,7 +180,7 @@ class SACAgent(BaseAgent):
         self,
         update_step: int,
         batch: Batch
-    ) -> Dict:
+    ) -> Dict[str, float]:
         cur_obs = torch.as_tensor(batch["observation"], device=self.device, dtype=self.dtype)
         actions = torch.as_tensor(batch["action"], device=self.device, dtype=self.dtype)
         rewards = torch.as_tensor(batch["reward"], device=self.device, dtype=self.dtype)
@@ -195,3 +197,38 @@ class SACAgent(BaseAgent):
         )
 
         return update_info
+
+    def count_parameters(self) -> Tuple[str, str, str]:
+        actor_num_params = count_parameters(self._actor)
+        critic_num_params = count_parameters(self._critic)
+        total_num_params = actor_num_params + critic_num_params
+
+        num_total = format_params_str(total_num_params)
+        num_actor = format_params_str(actor_num_params)
+        num_critic = format_params_str(critic_num_params)
+
+        return num_total, num_actor, num_critic
+
+    def get_metrics(
+        self,
+        update_step: int,
+        batch: Batch
+    ) -> Dict[str, float]:
+        cur_obs = torch.as_tensor(batch["observation"], device=self.device, dtype=self.dtype)
+        actions = torch.as_tensor(batch["action"], device=self.device, dtype=self.dtype)
+        next_obs = torch.as_tensor(batch["next_observation"], device=self.device, dtype=self.dtype)
+
+        actor_metrics_info = get_actor_metrics(
+            actor=self._actor,
+            cur_obs=cur_obs
+        )
+        critic_metrics_info = get_critic_metrics(
+            actor=self._actor,
+            critic=self._critic,
+            cur_obs=cur_obs,
+            actions=actions,
+            next_obs=next_obs,
+            critic_use_cdq=self._cfg.critic_use_cdq
+        )
+        
+        return {**actor_metrics_info, **critic_metrics_info}

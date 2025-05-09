@@ -67,7 +67,7 @@ class Update:
             zs=zs
         )
         temperature_info = self.update_temperature(
-            entropy=actor_info['train/entropy']
+            entropy=actor_info['train_actor/entropy']
         )
         critic_info = self.update_critic(
             zsa=zsa,
@@ -101,17 +101,17 @@ class Update:
         with torch.no_grad():
             next_zs = self._target_encoder.zs(next_obs)
 
-        pred_zs = self._encoder.zs(cur_obs)
+        pred_zs = self._encoder.zs(cur_obs[:, 0])
         prev_not_done = 1
         encoder_loss = 0
-        
+
         for i in range(self._cfg.encoder_horizon):
             za = self._encoder.za(actions[:, i])
             pred_d, pred_zs, pred_r = self._encoder.model_all(pred_zs, za)
 
             dyn_loss = masked_mse(pred_zs, next_zs[:, i], prev_not_done)
             reward_loss = (self._two_hot.cross_entropy_loss(pred_r, rewards[:, i].reshape(-1, 1)) * prev_not_done).mean()
-            done_loss = masked_mse(pred_d, terminated[:, i].reshape(-1, 1))
+            done_loss = masked_mse(pred_d, terminated[:, i].reshape(-1, 1), prev_not_done)
 
             encoder_loss += self._cfg.dyn_weight * dyn_loss + self._cfg.reward_weight * reward_loss + self._cfg.done_weight * done_loss
             prev_not_done = (1 - terminated[:,i].reshape(-1,1)) * prev_not_done
@@ -125,12 +125,12 @@ class Update:
         self._encoder_optimizer.step()
 
         info = {
-            'train/dyn_loss': dyn_loss.item(),
-            'train/reward_loss': reward_loss.item(),
-            'train/done_loss': done_loss.item(),
-            'train/encoder_loss': encoder_loss.item(),
-            'train/encoder_pnorm': encoder_pnorm,
-            'train/encoder_gnorm': encoder_gnorm
+            'train_encoder/dyn_loss': dyn_loss.item(),
+            'train_encoder/reward_loss': reward_loss.item(),
+            'train_encoder/done_loss': done_loss.item(),
+            'train_encoder/loss': encoder_loss.item(),
+            'train_encoder/pnorm': encoder_pnorm,
+            'train_encoder/gnorm': encoder_gnorm
         }
 
         return info
@@ -164,11 +164,11 @@ class Update:
         self._actor_optimizer.step()
 
         info = {
-            'train/actor_loss': actor_loss.item(),
-            'train/entropy': -log_probs.mean().item(),
-            'train/actor_action': actions.abs().mean().item(),
-            'train/actor_pnorm': actor_pnorm,
-            'train/actor_gnorm': actor_gnorm
+            'train_actor/loss': actor_loss.item(),
+            'train_actor/entropy': -log_probs.mean().item(),
+            'train_actor/action': actions.abs().mean().item(),
+            'train_actor/pnorm': actor_pnorm,
+            'train_actor/gnorm': actor_gnorm
         }
 
         return info
@@ -220,12 +220,12 @@ class Update:
         self._critic_optimizer.step()
 
         info = {
-            'train/critic_loss': critic_loss.item(),
-            'train/q1_mean': pred_q1.mean().item(),
-            'train/q2_mean': pred_q2.mean().item(),
+            'train_critic/loss': critic_loss.item(),
+            'train_critic/q1_mean': pred_q1.mean().item(),
+            'train_critic/q2_mean': pred_q2.mean().item(),
             'train/rew_mean': rewards.mean().item(),
-            'train/critic_pnorm': critic_pnorm,
-            'train/critic_gnorm': critic_gnorm,
+            'train_critic/pnorm': critic_pnorm,
+            'train_critic/gnorm': critic_gnorm,
         }
 
         return info

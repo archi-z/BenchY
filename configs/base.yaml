@@ -2,8 +2,8 @@
 # Common
 ##################################################################################
 
-project_name: 'BenchY'
-group_name: ${agent.agent_type}_${env.env_name}_RR=${updates_per_interaction_step}
+project_name: 'BenchY-05-09-metrics'
+group_name: ${agent.agent_type}_${env.env_name}
 exp_name: seed=${seed}_${agent.agent_type}_${env.env_name}_AD=${agent.actor_num_blocks}_AW=${agent.actor_hidden_dim}_CD=${agent.critic_num_blocks}_CW=${agent.critic_hidden_dim}
 seed: 0
 server: 'local'
@@ -28,6 +28,7 @@ updates_per_interaction_step: 2           # number of updates per interaction st
 evaluation_per_interaction_step: 25_000   # evaluation frequency per interaction step.
 recording_per_interaction_step: ${num_interaction_steps}   # video recording frequency per interaction step.
 logging_per_interaction_step: 5_000       # logging frequency per interaction step.
+metric_per_interaction_step: 5_000        # calculating metrics frequency per interaction step.
 num_eval_episodes: 10
 num_record_episodes: 1
 

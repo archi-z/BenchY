@@ -3,6 +3,7 @@ from typing import Dict, TypeVar
 
 import gymnasium as gym
 import numpy as np
+import torch
 
 Config = TypeVar("Config")
 
@@ -27,7 +28,7 @@ class BaseAgent(ABC):
         interaction_step: int,
         prev_timestep: Dict[str, np.ndarray],
         training: bool,
-    ) -> np.ndarray:
+    ) -> torch.Tensor:
         pass
 
     @abstractmethod
@@ -55,7 +56,7 @@ class AgentWrapper(BaseAgent):
         interaction_step: int,
         prev_timestep: Dict[str, np.ndarray],
         training: bool,
-    ) -> np.ndarray:
+    ) -> torch.Tensor:
         return self.agent.sample_actions(
             interaction_step=interaction_step,
             prev_timestep=prev_timestep,

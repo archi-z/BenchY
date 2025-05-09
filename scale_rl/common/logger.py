@@ -6,7 +6,7 @@ import wandb
 
 
 class WandbTrainerLogger(object):
-    def __init__(self, cfg: Dict):
+    def __init__(self, cfg: Dict, num_params: Dict):
         self.cfg = cfg
         dict_cfg = OmegaConf.to_container(cfg, throw_on_missing=True)
 
@@ -14,8 +14,10 @@ class WandbTrainerLogger(object):
             project=cfg.project_name,
             group=cfg.group_name,
             config=dict_cfg,
-            name=cfg.exp_name
+            name=cfg.exp_name,
+            # mode="disabled"
         )
+        wandb.config.update(num_params)
 
         self.reset()
 
