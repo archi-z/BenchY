@@ -12,6 +12,7 @@ from scale_rl.agents.mrsac.mrsac_network import (
     MRSACTemperature
 )
 from scale_rl.networks.loss import TwoHot, masked_mse
+from scale_rl.networks.metrics import cal_pge
 
 
 class Update:
@@ -89,7 +90,6 @@ class Update:
 
         return  info
 
-
     def update_encoder(
         self,
         cur_obs: torch.Tensor,
@@ -119,8 +119,7 @@ class Update:
         self._encoder_optimizer.zero_grad()
         encoder_loss.backward()
 
-        encoder_pnorm = sum(p.norm(2).item() for p in self._encoder.parameters())
-        encoder_gnorm = sum(p.grad.norm(2).item() for p in self._encoder.parameters() if p.grad is not None)
+        encoder_pnorm, encoder_gnorm, encoder_elr= cal_pge(self._encoder)
 
         self._encoder_optimizer.step()
 
@@ -129,12 +128,12 @@ class Update:
             'train_encoder/reward_loss': reward_loss.item(),
             'train_encoder/done_loss': done_loss.item(),
             'train_encoder/loss': encoder_loss.item(),
-            'train_encoder/pnorm': encoder_pnorm,
-            'train_encoder/gnorm': encoder_gnorm
+            'train_encoder/pnorm': encoder_pnorm.item(),
+            'train_encoder/gnorm': encoder_gnorm.item(),
+            'train_encoder/effective_lr': encoder_elr.item(),
         }
 
         return info
-
 
     def update_actor(
         self,
@@ -158,8 +157,7 @@ class Update:
         self._actor_optimizer.zero_grad()
         actor_loss.backward()
 
-        actor_pnorm = sum(p.norm(2).item() for p in self._actor.parameters())
-        actor_gnorm = sum(p.grad.norm(2).item() for p in self._actor.parameters() if p.grad is not None)
+        actor_pnorm, actor_gnorm, actor_elr= cal_pge(self._actor)
 
         self._actor_optimizer.step()
 
@@ -167,12 +165,12 @@ class Update:
             'train_actor/loss': actor_loss.item(),
             'train_actor/entropy': -log_probs.mean().item(),
             'train_actor/action': actions.abs().mean().item(),
-            'train_actor/pnorm': actor_pnorm,
-            'train_actor/gnorm': actor_gnorm
+            'train_actor/pnorm': actor_pnorm.item(),
+            'train_actor/gnorm': actor_gnorm.item(),
+            'train_actor/effective_lr': actor_elr.item()
         }
 
         return info
-
 
     def update_critic(
         self,
@@ -214,8 +212,7 @@ class Update:
         self._critic_optimizer.zero_grad()
         critic_loss.backward()
 
-        critic_pnorm = sum(p.norm(2).item() for p in self._critic.parameters())
-        critic_gnorm = sum(p.grad.norm(2).item() for p in self._critic.parameters() if p.grad is not None)
+        critic_pnorm, critic_gnorm, critic_elr= cal_pge(self._critic)
 
         self._critic_optimizer.step()
 
@@ -224,8 +221,9 @@ class Update:
             'train_critic/q1_mean': pred_q1.mean().item(),
             'train_critic/q2_mean': pred_q2.mean().item(),
             'train/rew_mean': rewards.mean().item(),
-            'train_critic/pnorm': critic_pnorm,
-            'train_critic/gnorm': critic_gnorm,
+            'train_critic/pnorm': critic_pnorm.item(),
+            'train_critic/gnorm': critic_gnorm.item(),
+            'train_critic/effective_lr': critic_elr.item()
         }
 
         return info
@@ -251,6 +249,7 @@ class Update:
         }
 
         return info
+
 
 def update_target_network(
     network: nn.Module,

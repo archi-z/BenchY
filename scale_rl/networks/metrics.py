@@ -221,3 +221,22 @@ def format_params_str(num_params):
         return f"{num_params / 1e3:.2f}K"
     else:
         return f"{num_params}"
+
+
+def cal_pge(model: nn.Module) -> Tuple[float, float, float]:
+    total_l1 = sum(p.abs().sum() for p in model.parameters())
+    eps = 1e-12
+
+    pnorm = torch.tensor(0.0, device=total_l1.device)
+    gnorm = torch.tensor(0.0, device=total_l1.device)
+    elr = torch.tensor(0.0, device=total_l1.device)
+    for p in model.parameters():
+        wi = p.abs().sum() / (total_l1 + eps)
+        gi = p.grad.norm(2)
+        thetai = p.norm(2)
+        elr += wi * (gi / (thetai + eps))
+
+        pnorm += thetai
+        gnorm += gi
+    
+    return pnorm, gnorm, elr.sqrt()
